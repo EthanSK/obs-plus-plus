@@ -551,6 +551,13 @@ static bool reactivate_capture(obs_properties_t *props __unused, obs_property_t 
         return false;
     }
 
+    // A reconnected display can have a new ID, so resolve its saved UUID again before retrying.
+    if (sc->capture_type != ScreenCaptureWindowStream) {
+        obs_data_t *settings = obs_source_get_settings(sc->source);
+        sc->display = get_display_migrate_settings(settings);
+        obs_data_release(settings);
+    }
+
     screen_capture_build_content_list(sc, sc->capture_type == ScreenCaptureDisplayStream);
     obs_enter_graphics();
     destroy_screen_stream(sc);
