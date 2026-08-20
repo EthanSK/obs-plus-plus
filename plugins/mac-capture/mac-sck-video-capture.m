@@ -108,6 +108,8 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
                 os_sem_post(sc->shareable_content_available);
                 sc->disp = NULL;
                 os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
+                sc->capture_failed = true;
+                obs_source_update_properties(sc->source);
                 return true;
             }
             if (sc->hide_obs) {
@@ -149,6 +151,8 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
                 os_sem_post(sc->shareable_content_available);
                 sc->disp = NULL;
                 os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
+                sc->capture_failed = true;
+                obs_source_update_properties(sc->source);
                 return true;
             } else {
                 content_filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:target_window];
@@ -168,6 +172,8 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
                 os_sem_post(sc->shareable_content_available);
                 sc->disp = NULL;
                 os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
+                sc->capture_failed = true;
+                obs_source_update_properties(sc->source);
                 return true;
             }
             SCRunningApplication *target_application = nil;
@@ -545,12 +551,12 @@ static bool reactivate_capture(obs_properties_t *props __unused, obs_property_t 
         return false;
     }
 
+    screen_capture_build_content_list(sc, sc->capture_type == ScreenCaptureDisplayStream);
     obs_enter_graphics();
     destroy_screen_stream(sc);
-    sc->capture_failed = false;
     init_screen_stream(sc);
     obs_leave_graphics();
-    obs_property_set_enabled(property, false);
+    obs_property_set_enabled(property, sc->capture_failed);
     return true;
 }
 
