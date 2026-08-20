@@ -1,5 +1,12 @@
-OBS Studio <https://obsproject.com>
-===================================
+OBS++
+=====
+
+OBS++ is EthanSK's personal macOS fork of `OBS Studio <https://obsproject.com>`_.
+It keeps the official OBS history and carries focused display-recovery and
+personal workflow improvements while remaining easy to sync with upstream.
+
+Upstream OBS Studio
+-------------------
 
 .. image:: https://github.com/obsproject/obs-studio/actions/workflows/push.yaml/badge.svg?branch=master
    :alt: OBS Studio Build Status - GitHub Actions

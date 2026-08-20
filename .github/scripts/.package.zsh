@@ -103,7 +103,7 @@ package() {
 
   check_${host_os}
 
-  local product_name='obs-studio'
+  local product_name='obs-plus-plus'
 
   local commit_version='0.0.0'
   local commit_distance='0'
@@ -118,13 +118,13 @@ package() {
 
   local output_name
   if (( commit_distance > 0 )) {
-    output_name="obs-studio-${commit_version}-${commit_hash}"
+    output_name="obs-plus-plus-${commit_version}-${commit_hash}"
   } else {
-    output_name="obs-studio-${commit_version}"
+    output_name="obs-plus-plus-${commit_version}"
   }
 
   if [[ ${host_os} == macos ]] {
-    if [[ ! -d build_macos/OBS.app ]] {
+    if [[ ! -d 'build_macos/OBS++.app' ]] {
       log_error 'No application bundle found. Run the build script to create a valid application bundle.'
       return 0
     }
@@ -134,28 +134,28 @@ package() {
 
     local volume_name
     if (( commit_distance > 0 )) {
-      volume_name="OBS Studio ${commit_version}-${commit_hash} (${arch_names[${target##*-}]})"
+      volume_name="OBS++ ${commit_version}-${commit_hash} (${arch_names[${target##*-}]})"
     } else {
-      volume_name="OBS Studio ${commit_version} (${arch_names[${target##*-}]})"
+      volume_name="OBS++ ${commit_version} (${arch_names[${target##*-}]})"
     }
 
     if (( package )) {
       pushd build_macos
 
-      mkdir -p obs-studio/.background
-      cp ${project_root}/cmake/macos/resources/background.tiff obs-studio/.background/
-      cp ${project_root}/cmake/macos/resources/AppIcon.icns obs-studio/.VolumeIcon.icns
-      ln -s /Applications obs-studio/Applications
+      mkdir -p obs-plus-plus/.background
+      cp ${project_root}/cmake/macos/resources/background.tiff obs-plus-plus/.background/
+      cp ${project_root}/cmake/macos/resources/AppIcon.icns obs-plus-plus/.VolumeIcon.icns
+      ln -s /Applications obs-plus-plus/Applications
 
-      mkdir -p obs-studio/OBS.app
-      ditto OBS.app obs-studio/OBS.app
+      mkdir -p 'obs-plus-plus/OBS++.app'
+      ditto 'OBS++.app' 'obs-plus-plus/OBS++.app'
 
       local -i _status=0
 
       autoload -Uz create_diskimage
-      create_diskimage obs-studio ${volume_name} ${output_name} || _status=1
+      create_diskimage obs-plus-plus ${volume_name} ${output_name} || _status=1
 
-      rm -r obs-studio
+      rm -r obs-plus-plus
       if (( _status )) {
         log_error "Disk image creation failed."
         return 2
@@ -186,9 +186,9 @@ package() {
       }
       popd
     } else {
-      log_group "Archiving obs-studio..."
+      log_group "Archiving obs-plus-plus..."
       pushd build_macos
-      XZ_OPT=-T0 tar -cvJf ${output_name}.tar.xz OBS.app
+      XZ_OPT=-T0 tar -cvJf ${output_name}.tar.xz 'OBS++.app'
       popd
     }
 
