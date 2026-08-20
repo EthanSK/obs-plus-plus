@@ -54,8 +54,8 @@ function(set_target_properties_obs target)
 
       set_target_xcode_properties(
         ${target}
-        PROPERTIES PRODUCT_BUNDLE_IDENTIFIER com.ethansk.obs-plus-plus
-                   PRODUCT_NAME "OBS++"
+        PROPERTIES PRODUCT_BUNDLE_IDENTIFIER ${OBS_BUNDLE_IDENTIFIER}
+                   PRODUCT_NAME ${OBS_PRODUCT_NAME}
                    ASSETCATALOG_COMPILER_APPICON_NAME AppIcon
                    CURRENT_PROJECT_VERSION ${OBS_BUILD_NUMBER}
                    MARKETING_VERSION ${OBS_VERSION_CANONICAL}
@@ -285,6 +285,34 @@ function(set_target_properties_obs target)
       )
 
       if(target STREQUAL obs-browser)
+        set(helper_output_name "${OBS_PRODUCT_NAME} Helper") # Chromium derives these helper names from the OBS++ executable name; keeping the upstream OBS names makes its GPU process fail and crashes the app.
+        set(helper_suffixes "::" " (GPU):_gpu:.gpu" " (Plugin):_plugin:.plugin" " (Renderer):_renderer:.renderer")
+
+        foreach(helper IN LISTS helper_suffixes)
+          string(REPLACE ":" ";" helper ${helper})
+          list(GET helper 0 helper_name)
+          list(GET helper 1 helper_target_suffix)
+          list(GET helper 2 helper_bundle_id_suffix)
+          get_target_property(helper_target OBS::browser-helper${helper_target_suffix} ALIASED_TARGET)
+
+          if(helper_target)
+            set(EXECUTABLE_NAME "${helper_output_name}${helper_name}")
+            set(BUNDLE_ID_SUFFIX ${helper_bundle_id_suffix})
+            configure_file(
+              "${CMAKE_CURRENT_SOURCE_DIR}/cmake/macos/Info-helper.plist.in"
+              "${CMAKE_CURRENT_BINARY_DIR}/Info-Helper${helper_bundle_id_suffix}.plist"
+            )
+            set_target_properties(
+              ${helper_target}
+              PROPERTIES OUTPUT_NAME "${EXECUTABLE_NAME}"
+                         MACOSX_BUNDLE_INFO_PLIST
+                         "${CMAKE_CURRENT_BINARY_DIR}/Info-Helper${helper_bundle_id_suffix}.plist"
+                         XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER
+                         "${OBS_BUNDLE_IDENTIFIER}.helper${helper_bundle_id_suffix}"
+            )
+          endif()
+        endforeach()
+
         # Good-enough for now as there are no other variants - in _theory_ we should only add the appropriate variant,
         # but that is only known at project generation and not build system configuration.
         get_target_property(imported_location CEF::Library IMPORTED_LOCATION_RELEASE)

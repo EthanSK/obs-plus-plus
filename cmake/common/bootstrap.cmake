@@ -43,6 +43,7 @@ endif()
 # Set default global project variables
 set(OBS_COMPANY_NAME "OBS Project")
 set(OBS_PRODUCT_NAME "OBS++")
+set(OBS_BUNDLE_IDENTIFIER "com.ethansk.obs-plus-plus")
 set(OBS_WEBSITE "https://www.obsproject.com")
 set(OBS_COMMENTS "Free and open source software for video recording and live streaming")
 set(OBS_LEGAL_COPYRIGHT "(C) Lain Bailey")
