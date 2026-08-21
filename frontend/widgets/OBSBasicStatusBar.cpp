@@ -3,6 +3,11 @@
 
 #include <widgets/OBSBasic.hpp>
 
+#include <algorithm>
+#include <cstring>
+
+#include <QStringList>
+
 #include "moc_OBSBasicStatusBar.cpp"
 
 static constexpr int bitrateUpdateSeconds = 2;
@@ -11,6 +16,66 @@ static constexpr float excellentThreshold = 0.0f;
 static constexpr float goodThreshold = 0.3333f;
 static constexpr float mediocreThreshold = 0.6667f;
 static constexpr float badThreshold = 1.0f;
+static constexpr char aitumOutputPrefix[] = "Aitum Stream Suite Output ";
+
+struct StreamOutputStatus {
+	std::string name;
+	QString displayName;
+	uint64_t totalBytes;
+	int droppedFrames;
+	int totalFrames;
+	float congestion;
+};
+
+static StreamOutputStatus GetStreamOutputStatus(obs_output_t *output, const QString &displayName)
+{
+	return {obs_output_get_name(output),         displayName,
+		obs_output_get_total_bytes(output),  obs_output_get_frames_dropped(output),
+		obs_output_get_total_frames(output), obs_output_get_congestion(output)};
+}
+
+static bool IsActiveStreamOutput(obs_output_t *output)
+{
+	return obs_output_active(output) || obs_output_reconnecting(output);
+}
+
+static std::vector<StreamOutputStatus> GetActiveStreamOutputs(obs_output_t *builtInOutput)
+{
+	std::vector<StreamOutputStatus> outputs;
+	if (builtInOutput && IsActiveStreamOutput(builtInOutput)) {
+		outputs.emplace_back(GetStreamOutputStatus(builtInOutput, QStringLiteral("Built-in stream")));
+	}
+
+	struct EnumContext {
+		obs_output_t *builtInOutput;
+		std::vector<StreamOutputStatus> *outputs;
+	} context{builtInOutput, &outputs};
+
+	obs_enum_outputs(
+		[](void *data, obs_output_t *output) {
+			auto *context = static_cast<EnumContext *>(data);
+			if (output == context->builtInOutput || !IsActiveStreamOutput(output)) {
+				return true;
+			}
+
+			const char *name = obs_output_get_name(output);
+			if (!name || strncmp(name, aitumOutputPrefix, sizeof(aitumOutputPrefix) - 1) != 0) {
+				return true;
+			}
+
+			const char *outputId = obs_output_get_id(output);
+			if (!obs_output_get_service(output) && (!outputId || strcmp(outputId, "ffmpeg_output") != 0)) {
+				return true; // Aitum recordings use the same name prefix, so only service and network FFmpeg outputs belong in stream status.
+			}
+
+			QString displayName = QString::fromUtf8(name + sizeof(aitumOutputPrefix) - 1);
+			context->outputs->emplace_back(GetStreamOutputStatus(output, displayName));
+			return true;
+		},
+		&context);
+
+	return outputs;
+}
 
 OBSBasicStatusBar::OBSBasicStatusBar(QWidget *parent)
 	: QStatusBar(parent),
@@ -32,6 +97,7 @@ OBSBasicStatusBar::OBSBasicStatusBar(QWidget *parent)
 	statusWidget->ui->streamTime->setDisabled(true);
 	statusWidget->ui->recordIcon->setPixmap(recordingInactivePixmap);
 	statusWidget->ui->recordTime->setDisabled(true);
+	statusWidget->ui->cpuUsage->setToolTip(QStringLiteral("Whole OBS++ process, including Aitum++."));
 	statusWidget->ui->delayFrame->hide();
 	statusWidget->ui->issuesFrame->hide();
 	statusWidget->ui->kbps->hide();
@@ -163,48 +229,60 @@ void OBSBasicStatusBar::UpdateDelayMsg()
 
 void OBSBasicStatusBar::UpdateBandwidth()
 {
-	if (!streamOutput) {
-		return;
-	}
-
-	if (++seconds < bitrateUpdateSeconds) {
-		return;
-	}
-
 	OBSOutput output = OBSGetStrongRef(streamOutput);
-	if (!output) {
+	const std::vector<StreamOutputStatus> outputs = GetActiveStreamOutputs(output);
+	if (outputs.empty()) {
+		lastBytesSentByOutput.clear();
+		lastBytesSentTime = 0;
+		statusWidget->ui->kbps->setText(QStringLiteral("0 kbps"));
+		statusWidget->ui->kbps->setToolTip(QString());
+		statusWidget->ui->kbps->hide();
 		return;
 	}
-
-	uint64_t bytesSent = obs_output_get_total_bytes(output);
-	uint64_t bytesSentTime = os_gettime_ns();
-
-	if (bytesSent < lastBytesSent) {
-		bytesSent = 0;
-	}
-	if (bytesSent == 0) {
-		lastBytesSent = 0;
-	}
-
-	uint64_t bitsBetween = (bytesSent - lastBytesSent) * 8;
-
-	double timePassed = double(bytesSentTime - lastBytesSentTime) / 1000000000.0;
-
-	double kbitsPerSec = double(bitsBetween) / timePassed / 1000.0;
-
-	QString text;
-	text += QString::number(kbitsPerSec, 'f', 0) + QString(" kbps");
-
-	statusWidget->ui->kbps->setText(text);
-	statusWidget->ui->kbps->setMinimumWidth(statusWidget->ui->kbps->width());
 
 	if (!statusWidget->ui->kbps->isVisible()) {
 		statusWidget->ui->kbps->show();
 	}
 
-	lastBytesSent = bytesSent;
+	const uint64_t bytesSentTime = os_gettime_ns();
+	if (!lastBytesSentTime) {
+		for (const StreamOutputStatus &stream : outputs) {
+			lastBytesSentByOutput.emplace(stream.name, stream.totalBytes);
+		}
+		lastBytesSentTime = bytesSentTime;
+		return;
+	}
+	for (const StreamOutputStatus &stream : outputs) {
+		lastBytesSentByOutput.try_emplace(stream.name, stream.totalBytes);
+	}
+
+	const double timePassed = double(bytesSentTime - lastBytesSentTime) / 1000000000.0;
+	if (timePassed < bitrateUpdateSeconds) {
+		return;
+	}
+
+	QStringList bitrateParts;
+	QStringList tooltipParts;
+	std::map<std::string, uint64_t> currentBytesSentByOutput;
+	for (const StreamOutputStatus &stream : outputs) {
+		const auto previous = lastBytesSentByOutput.find(stream.name);
+		const uint64_t previousBytes = previous == lastBytesSentByOutput.end() ||
+							       stream.totalBytes < previous->second
+						       ? stream.totalBytes
+						       : previous->second;
+		const double kbitsPerSec = double((stream.totalBytes - previousBytes) * 8) / timePassed / 1000.0;
+		const QString bitrate = QString::number(kbitsPerSec, 'f', 0);
+		bitrateParts.emplace_back(bitrate);
+		tooltipParts.emplace_back(QStringLiteral("%1: %2 kbps").arg(stream.displayName, bitrate));
+		currentBytesSentByOutput.emplace(stream.name, stream.totalBytes);
+	}
+
+	statusWidget->ui->kbps->setText(bitrateParts.join(QStringLiteral(" + ")) + QStringLiteral(" kbps"));
+	statusWidget->ui->kbps->setToolTip(tooltipParts.join(QLatin1Char('\n')));
+	statusWidget->ui->kbps->setMinimumWidth(statusWidget->ui->kbps->width());
+
+	lastBytesSentByOutput = std::move(currentBytesSentByOutput);
 	lastBytesSentTime = bytesSentTime;
-	seconds = 0;
 }
 
 void OBSBasicStatusBar::UpdateCPUUsage()
@@ -219,6 +297,10 @@ void OBSBasicStatusBar::UpdateCPUUsage()
 
 	statusWidget->ui->cpuUsage->setText(text);
 	statusWidget->ui->cpuUsage->setMinimumWidth(statusWidget->ui->cpuUsage->width());
+	if (!active) {
+		UpdateBandwidth();
+		UpdateDroppedFrames();
+	}
 
 	UpdateCurrentFPS();
 }
@@ -314,35 +396,54 @@ void OBSBasicStatusBar::UpdateRecordTimeLabel()
 
 void OBSBasicStatusBar::UpdateDroppedFrames()
 {
-	if (!streamOutput) {
-		return;
-	}
-
 	OBSOutput output = OBSGetStrongRef(streamOutput);
-	if (!output) {
+	const std::vector<StreamOutputStatus> outputs = GetActiveStreamOutputs(output);
+	if (outputs.empty()) {
+		statusWidget->ui->droppedFrames->setText(QTStr("DroppedFrames").arg("0", "0.0"));
+		statusWidget->ui->droppedFrames->setToolTip(QString());
+		statusWidget->ui->issuesFrame->hide();
+		statusWidget->ui->statusIcon->setPixmap(inactivePixmap);
+		congestionArray.clear();
+		lastCongestion = 0.0f;
+		firstCongestionUpdate = false;
 		return;
 	}
-
-	int totalDropped = obs_output_get_frames_dropped(output);
-	int totalFrames = obs_output_get_total_frames(output);
-	double percent = (double)totalDropped / (double)totalFrames * 100.0;
-
-	if (!totalFrames) {
-		return;
-	}
-
-	QString text = QTStr("DroppedFrames");
-	text = text.arg(QString::number(totalDropped), QString::number(percent, 'f', 1));
-	statusWidget->ui->droppedFrames->setText(text);
 
 	if (!statusWidget->ui->issuesFrame->isVisible()) {
 		statusWidget->ui->issuesFrame->show();
+		firstCongestionUpdate = true;
 	}
+
+	QStringList droppedParts;
+	QStringList tooltipParts;
+	float congestion = 0.0f;
+	for (const StreamOutputStatus &stream : outputs) {
+		const double percent =
+			stream.totalFrames ? double(stream.droppedFrames) / double(stream.totalFrames) * 100.0 : 0.0;
+		const QString dropped =
+			QStringLiteral("%1 (%2%)")
+				.arg(QString::number(stream.droppedFrames), QString::number(percent, 'f', 1));
+		droppedParts.emplace_back(dropped);
+		tooltipParts.emplace_back(QStringLiteral("%1: %2").arg(stream.displayName, dropped));
+		congestion = std::max(congestion, stream.congestion);
+	}
+
+	QString text = QTStr("DroppedFrames")
+			       .arg(QString::number(outputs.front().droppedFrames),
+				    QString::number(outputs.front().totalFrames
+							    ? double(outputs.front().droppedFrames) /
+								      double(outputs.front().totalFrames) * 100.0
+							    : 0.0,
+						    'f', 1));
+	for (qsizetype index = 1; index < droppedParts.size(); ++index) {
+		text += QStringLiteral(" + ") + droppedParts.at(index);
+	}
+	statusWidget->ui->droppedFrames->setText(text);
+	statusWidget->ui->droppedFrames->setToolTip(tooltipParts.join(QLatin1Char('\n')));
 
 	/* ----------------------------------- *
 	 * calculate congestion color          */
 
-	float congestion = obs_output_get_congestion(output);
 	float avgCongestion = (congestion + lastCongestion) * 0.5f;
 	if (avgCongestion < congestion) {
 		avgCongestion = congestion;
@@ -426,9 +527,8 @@ void OBSBasicStatusBar::ReconnectClear()
 {
 	retries = 0;
 	reconnectTimeout = 0;
-	seconds = -1;
-	lastBytesSent = 0;
-	lastBytesSentTime = os_gettime_ns();
+	lastBytesSentByOutput.clear();
+	lastBytesSentTime = 0;
 	delaySecTotal = 0;
 	UpdateDelayMsg();
 }
@@ -521,8 +621,8 @@ void OBSBasicStatusBar::StreamStarted(obs_output_t *output)
 				this);
 
 	retries = 0;
-	lastBytesSent = 0;
-	lastBytesSentTime = os_gettime_ns();
+	lastBytesSentByOutput.clear();
+	lastBytesSentTime = 0;
 	Activate();
 }
 

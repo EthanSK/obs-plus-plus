@@ -7,6 +7,9 @@
 #include <QPointer>
 #include <QStatusBar>
 
+#include <map>
+#include <string>
+
 class QTimer;
 
 class OBSBasicStatusBar : public QStatusBar {
@@ -40,8 +43,7 @@ private:
 	int startTotalFrameCount = 0;
 	int lastSkippedFrameCount = 0;
 
-	int seconds = 0;
-	uint64_t lastBytesSent = 0;
+	std::map<std::string, uint64_t> lastBytesSentByOutput;
 	uint64_t lastBytesSentTime = 0;
 
 	QPixmap excellentPixmap;
