@@ -96,7 +96,8 @@ static const UInt32 kMaxFrameRateRangesInDescription = 10;
                         }
                     }
                 } else {
-                    [instance AVCaptureLog:LOG_ERROR withFormat:error.localizedDescription];
+                    [instance AVCaptureLog:LOG_ERROR
+                            withFormat:@"%@", error.localizedDescription ?: @"Unable to create capture session"];
                 }
             });
         }
@@ -1155,7 +1156,7 @@ static const UInt32 kMaxFrameRateRangesInDescription = 10;
         return;
     }
 
-    NSError *error;
+    NSError *error = nil; // A USB camera can reconnect before its formats return, so failure logging must handle a missing NSError.
     NSString *presetName = [OBSAVCapture stringFromSettings:self.captureInfo->settings withSetting:@"preset"];
     BOOL isPresetEnabled = obs_data_get_bool(self.captureInfo->settings, "use_preset");
     BOOL isFastPath = self.captureInfo->isFastPath;
@@ -1173,10 +1174,12 @@ static const UInt32 kMaxFrameRateRangesInDescription = 10;
                 [self startCaptureSession];
             });
         } else {
-            [self AVCaptureLog:LOG_ERROR withFormat:error.localizedDescription];
+            [self AVCaptureLog:LOG_ERROR
+                    withFormat:@"%@", error.localizedDescription ?: @"Unable to configure reconnected capture device"];
         }
     } else {
-        [self AVCaptureLog:LOG_ERROR withFormat:error.localizedDescription];
+        [self AVCaptureLog:LOG_ERROR
+                withFormat:@"%@", error.localizedDescription ?: @"Unable to reconnect capture device"];
     }
 
     obs_source_update_properties(self.captureInfo->source);
