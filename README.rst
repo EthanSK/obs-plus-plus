@@ -1,86 +1,57 @@
 OBS++
 =====
 
-OBS++ is EthanSK's personal macOS fork of `OBS Studio <https://obsproject.com>`_.
-It keeps the official OBS history and carries focused display-recovery and
-personal workflow improvements while remaining easy to sync with upstream.
+My macOS fork of `OBS Studio <https://obsproject.com>`_, with display and camera
+recovery fixes and status reporting for multiple Aitum streams.
 
-Upstream OBS Studio
--------------------
+`My setup <https://ethansk.github.io/ethan-setup/>`_ ·
+`Setup and build guide <SETUP.md>`_ ·
+`Changes from upstream <FORK-CHANGES.md>`_ ·
+`Aitum++ <https://github.com/EthanSK/obs-aitum-stream-suite>`_
 
-.. image:: https://github.com/obsproject/obs-studio/actions/workflows/push.yaml/badge.svg?branch=master
-   :alt: OBS Studio Build Status - GitHub Actions
-   :target: https://github.com/obsproject/obs-studio/actions/workflows/push.yaml?query=branch%3Amaster
-
-.. image:: https://badges.crowdin.net/obs-studio/localized.svg
-   :alt: OBS Studio Translation Project Progress
-   :target: https://crowdin.com/project/obs-studio
-
-.. image:: https://img.shields.io/discord/348973006581923840.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2
-   :alt: OBS Studio Discord Server
-   :target: https://obsproject.com/discord
-
-What is OBS Studio?
--------------------
-
-OBS Studio is software designed for capturing, compositing, encoding,
-recording, and streaming video content, efficiently.
-
-It's distributed under the GNU General Public License v2 (or any later
-version) - see the accompanying COPYING file for more details.
-
-Quick Links
------------
-
-- Website: https://obsproject.com
-
-- Help/Documentation/Guides: https://github.com/obsproject/obs-studio/wiki
-
-- Forums: https://obsproject.com/forum/
-
-- Build Instructions: https://github.com/obsproject/obs-studio/wiki/Install-Instructions
-
-- Developer/API Documentation: https://obsproject.com/docs
-
-- Donating/backing/sponsoring: https://obsproject.com/contribute
-
-- Bug Tracker: https://github.com/obsproject/obs-studio/issues
-
-Contributing
+What changed
 ------------
 
-- If you would like to help fund or sponsor the project, you can do so
-  via `Patreon <https://www.patreon.com/obsproject>`_, `OpenCollective
-  <https://opencollective.com/obsproject>`_, or `PayPal
-  <https://www.paypal.me/obsproject>`_.  See our `contribute page
-  <https://obsproject.com/contribute>`_ for more information.
+- A disconnected capture target leaves its restart action available; retrying
+  refreshes the target list and resolves a reconnected display's saved identity.
+- Camera reconnect failures log a missing error safely instead of crashing in
+  the error-reporting path.
+- The bottom status bar includes built-in and Aitum stream bitrates, dropped
+  frames and congestion. Hover for individual outputs; CPU is the shared OBS
+  process total, not a separate CPU measurement for each stream.
+- macOS app and Chromium helper names use OBS++ consistently.
 
-- If you wish to contribute code to the project, please make sure to
-  read the coding and commit guidelines:
-  https://github.com/obsproject/obs-studio/blob/master/CONTRIBUTING.md
-  
-- Code for the project follows the code style guidelines, located
-  here: https://github.com/obsproject/obs-studio/blob/master/CODESTYLE.md
+These are focused changes on top of OBS 32.2.2 source, not a promise that every
+capture or USB failure is recoverable. The exact commits and limits are in
+`FORK-CHANGES.md <FORK-CHANGES.md>`_.
 
-- Developer/API documentation can be found here:
-  https://obsproject.com/docs
+Use my setup
+------------
 
-- If you wish to contribute translations, do not submit pull requests.
-  Instead, please use Crowdin.  For more information read this page:
-  https://obsproject.com/wiki/How-To-Contribute-Translations-For-OBS
+I use OBS++ with `Aitum++ <https://github.com/EthanSK/obs-aitum-stream-suite>`_ for
+extra canvases, independently configured streaming outputs and recovery controls.
+The `setup guide <SETUP.md>`_ covers my desk and laptop profiles, audio, encoder
+settings, installation and an initial recording check.
 
-- Contributors to OBS Studio and related repositories are expected to
-  follow our Code of Conduct, which can be read here:
-  https://github.com/obsproject/obs-studio/blob/master/COC.rst
+**Source distribution:** this fork has no published installer or binary release.
+The installed app on my Mac is a local build. The upstream OBS download does not
+include these patches. Build the fork if you need them; signing and notarization
+for redistributing your own build are separate steps.
 
-- Other ways to contribute are by helping people out with support on
-  our forums or in our community chat.  Please limit support to topics
-  you fully understand -- bad advice is worse than no advice.  When it
-  comes to something that you don't fully know or understand, please
-  defer to the official help or official channels.
+Upstream and support
+--------------------
 
+OBS Studio captures, composites, records and streams video. OBS++ preserves its
+history and is licensed under GPL v2 or later; see `COPYING <COPYING>`_. The code,
+artwork and trademarks retain their respective owners' rights. This is an
+independent personal fork, not an official OBS release.
 
-SAST Tools
-----------
+- Fork issues: https://github.com/EthanSK/obs-plus-plus/issues
+- Upstream documentation: https://obsproject.com/kb
+- Upstream build instructions: https://github.com/obsproject/obs-studio/wiki/Install-Instructions
+- Upstream contribution rules: https://github.com/obsproject/obs-studio/blob/master/CONTRIBUTING.md
+- Support upstream OBS: https://obsproject.com/contribute
 
-`PVS-Studio <https://pvs-studio.com/pvs-studio/?utm_source=website&utm_medium=github&utm_campaign=open_source>`_ - static analyzer for C, C++, C#, and Java code.
+Report fork-specific problems here, with a sanitized log and reproduction steps.
+Do not include stream keys or private scene exports. Follow upstream's own
+contribution policy before submitting anything there.

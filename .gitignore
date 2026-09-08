@@ -22,6 +22,8 @@
 !.mailmap
 !.swift-format
 !AGENTS.md
+!SETUP.md
+!FORK-CHANGES.md
 !AUTHORS
 !buildspec.json
 !CMakeLists.txt
