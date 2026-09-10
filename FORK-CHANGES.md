@@ -24,3 +24,8 @@ bitrate settings or route audio. CPU remains a whole-process measurement.
 This documentation was checked against the source and installed setup on
 8 September 2026. It is not a new crash reproduction, native rebuild or fresh
 hardware recovery test; those actions would interrupt the active recording.
+
+The 10 September audit found that the installed executable did **not** contain
+the multiple-stream status patch, although the local build and fork did.
+Treat the table as source history, not proof that every patch is installed;
+compare the exact built and installed executables before claiming runtime fixes.
