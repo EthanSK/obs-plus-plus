@@ -29,3 +29,13 @@ The 10 September audit found that the installed executable did **not** contain
 the multiple-stream status patch, although the local build and fork did.
 Treat the table as source history, not proof that every patch is installed;
 compare the exact built and installed executables before claiming runtime fixes.
+
+## Saved-recording Finder link
+
+On macOS, clicking the bottom-bar recording-saved message reveals that exact
+file selected in Finder. The tooltip is `Show in Finder` followed by the full
+path. This covers successful recording stops and file splits, retains the
+ten-second message lifetime, and does not change recording destinations or
+open a video player. The release build and isolated Finder interaction passed
+on 14 September 2026; installation in the live OBS++ app remains deferred while
+recording is active.

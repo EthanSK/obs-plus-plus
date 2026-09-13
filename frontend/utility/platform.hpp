@@ -106,4 +106,5 @@ MacPermissionStatus CheckPermissionWithPrompt(MacPermissionType type, bool promp
 #define CheckPermission(x) CheckPermissionWithPrompt(x, false)
 #define RequestPermission(x) CheckPermissionWithPrompt(x, true)
 void OpenMacOSPrivacyPreferences(const char *tab);
+void ShowFileInFinder(const char *path);
 #endif

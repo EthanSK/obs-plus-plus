@@ -63,6 +63,12 @@ string GetDefaultVideoSavePath()
     return url.path.fileSystemRepresentation;
 }
 
+void ShowFileInFinder(const char *path)
+{
+    NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[url]];
+}
+
 vector<string> GetPreferredLocales()
 {
     NSArray *preferred = [NSLocale preferredLanguages];

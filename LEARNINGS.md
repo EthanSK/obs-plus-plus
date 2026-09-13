@@ -25,3 +25,18 @@ streaming output: active bitrates and dropped-frame values use ` + ` separators,
 tooltips identify each output, and recording is not counted as a stream.
 These installed-runtime acceptance checks remain distinct from source review,
 symbol/hash comparison, and signature verification.
+
+## Reveal saved recordings without parsing the displayed message
+
+Pass the actual saved path from both recording-stop and file-split callbacks to
+`OBSBasicStatusBar::showRecordingSaved`. The label can be clipped and translated,
+so its visible text is not a reliable path source. Encode the file URL and escape
+both link text and tooltip HTML; filenames can contain quotes, ampersands, angle
+brackets, percent signs and non-ASCII characters. Use Finder's native file
+selection API rather than opening the recording in its default player.
+
+Ordinary messages and timeout clearing must remove the previous link interaction
+and tooltip. The release build and isolated Qt/Finder check on 14 September 2026
+verified exact-file selection and the existing ten-second timeout without
+interrupting OBS. This is not installed-runtime acceptance; installation was
+deferred while the existing OBS recording was active.

@@ -2,11 +2,13 @@
 #include "ui_StatusBarWidget.h"
 
 #include <widgets/OBSBasic.hpp>
+#include <utility/platform.hpp>
 
 #include <algorithm>
 #include <cstring>
 
 #include <QStringList>
+#include <QUrl>
 
 #include "moc_OBSBasicStatusBar.cpp"
 
@@ -90,6 +92,10 @@ OBSBasicStatusBar::OBSBasicStatusBar(QWidget *parent)
 	congestionArray.reserve(congestionUpdateSeconds);
 
 	statusWidget = new StatusBarWidget(this);
+#ifdef __APPLE__
+	connect(statusWidget->ui->message, &QLabel::linkActivated, this,
+		[](const QString &link) { ShowFileInFinder(QT_TO_UTF8(QUrl(link).toLocalFile())); });
+#endif
 	statusWidget->ui->delayInfo->setText("");
 	statusWidget->ui->droppedFrames->setText(QTStr("DroppedFrames").arg("0", "0.0"));
 	statusWidget->ui->statusIcon->setPixmap(inactivePixmap);
@@ -707,6 +713,9 @@ void OBSBasicStatusBar::showMessage(const QString &message, int timeout)
 {
 	messageTimer->stop();
 
+	statusWidget->ui->message->setTextFormat(Qt::PlainText);
+	statusWidget->ui->message->setTextInteractionFlags(Qt::NoTextInteraction);
+	statusWidget->ui->message->setToolTip("");
 	statusWidget->ui->message->setText(message);
 
 	if (timeout) {
@@ -714,7 +723,25 @@ void OBSBasicStatusBar::showMessage(const QString &message, int timeout)
 	}
 }
 
+void OBSBasicStatusBar::showRecordingSaved(const QString &path)
+{
+	const QString message = QTStr("Basic.StatusBar.RecordingSavedTo").arg(path);
+	showMessage(message, 10000);
+#ifdef __APPLE__
+	const QString link = QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded).toHtmlEscaped();
+	statusWidget->ui->message->setTextFormat(Qt::RichText);
+	statusWidget->ui->message->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
+	statusWidget->ui->message->setText(
+		QStringLiteral("<a href=\"%1\">%2</a>")
+			.arg(link,
+			     message.toHtmlEscaped())); // Keep the exact path in the link even when the visible message is clipped, and escape filenames as text.
+	statusWidget->ui->message->setToolTip(
+		QStringLiteral("<qt>%1<br>%2</qt>")
+			.arg(QTStr("Basic.StatusBar.ShowInFinder").toHtmlEscaped(), path.toHtmlEscaped()));
+#endif
+}
+
 void OBSBasicStatusBar::clearMessage()
 {
-	statusWidget->ui->message->setText("");
+	showMessage("");
 }

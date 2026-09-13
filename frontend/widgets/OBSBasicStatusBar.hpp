@@ -85,6 +85,7 @@ public slots:
 
 	void clearMessage();
 	void showMessage(const QString &message, int timeout = 0);
+	void showRecordingSaved(const QString &path);
 
 private slots:
 	void Reconnect(int seconds);
