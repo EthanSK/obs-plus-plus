@@ -71,6 +71,10 @@ struct vt_encoder {
 	VTCompressionSessionRef session;
 	CMSimpleQueueRef queue;
 	bool hw_enc;
+	uint64_t callback_errors;
+	uint64_t callback_dropped_frames;
+	uint64_t callback_queue_rejections;
+	uint64_t last_callback_log_ns;
 	DARRAY(uint8_t) packet_data;
 	DARRAY(uint8_t) extra_data;
 };
@@ -108,9 +112,9 @@ static void log_osstatus(int log_level, struct vt_encoder *enc, const char *cont
 	c_str = cfstr_copy_cstr(str, kCFStringEncodingUTF8);
 	if (c_str) {
 		if (enc)
-			VT_BLOG(log_level, "Error in %s: %s", context, c_str);
+			VT_BLOG(log_level, "Error in %s (OSStatus %d): %s", context, (int)code, c_str);
 		else
-			VT_LOG(log_level, "Error in %s: %s", context, c_str);
+			VT_LOG(log_level, "Error in %s (OSStatus %d): %s", context, (int)code, c_str);
 	}
 
 	bfree(c_str);
@@ -404,21 +408,36 @@ void sample_encoded_callback(void *data, void *source, OSStatus status, VTEncode
 			     CMSampleBufferRef buffer)
 {
 	UNUSED_PARAMETER(source);
-
+	struct vt_encoder *enc = data;
+	bool failed = false;
 	if (status != noErr) {
-		log_osstatus(LOG_ERROR, NULL, "encoder callback", status);
-		return;
+		enc->callback_errors++;
+		failed = true;
+	} else {
+		if (info_flags & kVTEncodeInfo_FrameDropped) {
+			enc->callback_dropped_frames++;
+			failed = true;
+		}
+		if (buffer != NULL) {
+			CFRetain(buffer);
+			if (CMSimpleQueueEnqueue(enc->queue, buffer) != noErr) {
+				CFRelease(buffer); // A full queue does not take ownership of the retained sample.
+				enc->callback_queue_rejections++;
+				failed = true;
+			}
+		}
 	}
-
-	if (info_flags == kVTEncodeInfo_FrameDropped) {
-		VT_LOG(LOG_INFO, "Frame dropped by encoder");
-	}
-
-	CMSimpleQueueRef queue = data;
-	if (buffer != NULL) {
-		CFRetain(buffer);
-		if (CMSimpleQueueEnqueue(queue, buffer) != noErr)
-			CFRelease(buffer); // A full queue does not take ownership of the retained sample.
+	if (failed) {
+		uint64_t now = os_gettime_ns();
+		if (!enc->last_callback_log_ns || now - enc->last_callback_log_ns >= 30000000000ULL) {
+			enc->last_callback_log_ns = now; // Repeated frame failures must not flood the OBS log.
+			VT_BLOG(LOG_WARNING,
+				"Callback failures: status=%d flags=0x%x errors=%llu dropped=%llu queue_rejected=%llu queued=%d",
+				(int)status, (unsigned)info_flags, (unsigned long long)enc->callback_errors,
+				(unsigned long long)enc->callback_dropped_frames,
+				(unsigned long long)enc->callback_queue_rejections,
+				(int)CMSimpleQueueGetCount(enc->queue));
+		}
 	}
 }
 
@@ -505,7 +524,7 @@ static OSStatus create_encoder(struct vt_encoder *enc)
 	CFDictionaryRef pixbuf_spec = create_pixbuf_spec(enc);
 
 	code = VTCompressionSessionCreate(kCFAllocatorDefault, enc->width, enc->height, enc->codec_type, encoder_spec,
-					  pixbuf_spec, NULL, &sample_encoded_callback, enc->queue, &s);
+					  pixbuf_spec, NULL, &sample_encoded_callback, enc, &s);
 
 	if (code != noErr) {
 		log_osstatus(LOG_ERROR, enc, "VTCompressionSessionCreate", code);
@@ -626,6 +645,11 @@ static void vt_destroy(void *data)
 			CFRelease(enc->session);
 		}
 		if (enc->queue != NULL) { // Invalidation ends callbacks; CMSimpleQueue does not release its elements.
+			VT_BLOG(LOG_INFO,
+				"Teardown: queued=%d callback_errors=%llu encoder_dropped=%llu queue_rejected=%llu",
+				(int)CMSimpleQueueGetCount(enc->queue), (unsigned long long)enc->callback_errors,
+				(unsigned long long)enc->callback_dropped_frames,
+				(unsigned long long)enc->callback_queue_rejections);
 			CMSampleBufferRef buffer;
 			while ((buffer = (CMSampleBufferRef)CMSimpleQueueDequeue(enc->queue)) != NULL)
 				CFRelease(buffer);
@@ -1072,12 +1096,15 @@ bool get_cached_pixel_buffer(struct vt_encoder *enc, CVPixelBufferRef *buf)
 {
 	OSStatus code;
 	CVPixelBufferPoolRef pool = VTCompressionSessionGetPixelBufferPool(enc->session);
-	if (!pool)
+	if (!pool) {
+		VT_BLOG(LOG_ERROR, "VTCompressionSessionGetPixelBufferPool returned no pool");
 		return false;
+	}
 
 	CVPixelBufferRef pixbuf;
 	code = CVPixelBufferPoolCreatePixelBuffer(NULL, pool, &pixbuf);
 	if (code != noErr) {
+		log_osstatus(LOG_ERROR, enc, "CVPixelBufferPoolCreatePixelBuffer", code);
 		goto fail;
 	}
 
@@ -1135,6 +1162,7 @@ static bool vt_encode(void *data, struct encoder_frame *frame, struct encoder_pa
 
 	code = CVPixelBufferLockBaseAddress(pixbuf, 0);
 	if (code != noErr) {
+		log_osstatus(LOG_ERROR, enc, "CVPixelBufferLockBaseAddress", code);
 		goto fail;
 	}
 
@@ -1155,11 +1183,13 @@ static bool vt_encode(void *data, struct encoder_frame *frame, struct encoder_pa
 
 	code = CVPixelBufferUnlockBaseAddress(pixbuf, 0);
 	if (code != noErr) {
+		log_osstatus(LOG_ERROR, enc, "CVPixelBufferUnlockBaseAddress", code);
 		goto fail;
 	}
 
 	code = VTCompressionSessionEncodeFrame(enc->session, pixbuf, pts, dur, NULL, NULL, NULL);
 	if (code != noErr) {
+		log_osstatus(LOG_ERROR, enc, "VTCompressionSessionEncodeFrame", code);
 		goto fail;
 	}
 	CFRelease(pixbuf); // VideoToolbox retains the input while needed, including asynchronous and failed callbacks.

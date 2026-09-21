@@ -1,8 +1,13 @@
 #include "mac-sck-common.h"
 #include "window-utils.h"
+#include <util/platform.h>
 
 API_AVAILABLE(macos(12.5)) static void destroy_screen_stream(struct screen_capture *sc)
 {
+    if (sc->texture_failures) {
+        MACCAP_LOG(LOG_INFO, "source='%s' display=%u texture_failures=%llu at stream teardown",
+                   obs_source_get_name(sc->source), sc->display, (unsigned long long) sc->texture_failures);
+    }
     if (sc->disp && !sc->capture_failed) {
         [sc->disp stopCaptureWithCompletionHandler:^(NSError *_Nullable error) {
             if (error && error.code != SCStreamErrorAttemptToStopStreamState) {
@@ -340,14 +345,29 @@ API_AVAILABLE(macos(12.5)) static void sck_video_capture_tick(void *data, float 
     pthread_mutex_unlock(&sc->mutex);
 
     if (prev_prev == sc->prev)
-        goto cleanup; // The callback retained the repeated surface too; release the replaced ownership.
+        goto cleanup;  // The callback retained the repeated surface too; release the replaced ownership.
 
     obs_enter_graphics();
-    if (sc->tex)
-        gs_texture_rebind_iosurface(sc->tex, sc->prev);
-    else
+    bool bound;
+    if (sc->tex) {
+        bound = gs_texture_rebind_iosurface(sc->tex, sc->prev);
+    } else {
         sc->tex = gs_texture_create_from_iosurface(sc->prev);
+        bound = sc->tex != NULL;
+    }
     obs_leave_graphics();
+
+    if (!bound) {
+        sc->texture_failures++;
+        uint64_t now = os_gettime_ns();
+        if (!sc->last_texture_error_log_ns || now - sc->last_texture_error_log_ns >= 30000000000ULL) {
+            sc->last_texture_error_log_ns = now;  // Rate-limit repeated graphics failures while retaining the total.
+            MACCAP_ERR("source='%s' display=%u surface=%u size=%zux%zu texture_failures=%llu",
+                       obs_source_get_name(sc->source), sc->display, IOSurfaceGetID(sc->prev),
+                       IOSurfaceGetWidth(sc->prev), IOSurfaceGetHeight(sc->prev),
+                       (unsigned long long) sc->texture_failures);
+        }
+    }
 
 cleanup:
     if (prev_prev) {

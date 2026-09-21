@@ -27,13 +27,15 @@ struct StreamOutputStatus {
 	int droppedFrames;
 	int totalFrames;
 	float congestion;
+	bool reconnecting;
 };
 
 static StreamOutputStatus GetStreamOutputStatus(obs_output_t *output, const QString &displayName)
 {
 	return {obs_output_get_name(output),         displayName,
 		obs_output_get_total_bytes(output),  obs_output_get_frames_dropped(output),
-		obs_output_get_total_frames(output), obs_output_get_congestion(output)};
+		obs_output_get_total_frames(output), obs_output_get_congestion(output),
+		obs_output_reconnecting(output)};
 }
 
 static bool IsActiveStreamOutput(obs_output_t *output)
@@ -298,8 +300,9 @@ void OBSBasicStatusBar::UpdateCPUUsage()
 		return;
 	}
 
+	const double cpuUsage = main->GetCPUUsage();
 	QString text;
-	text += QString("CPU: ") + QString::number(main->GetCPUUsage(), 'f', 1) + QString("%");
+	text += QString("CPU: ") + QString::number(cpuUsage, 'f', 1) + QString("%");
 
 	statusWidget->ui->cpuUsage->setText(text);
 	statusWidget->ui->cpuUsage->setMinimumWidth(statusWidget->ui->cpuUsage->width());
@@ -309,6 +312,44 @@ void OBSBasicStatusBar::UpdateCPUUsage()
 	}
 
 	UpdateCurrentFPS();
+	LogOutputHealth(cpuUsage); // A second CPU query would reset its sampling interval.
+}
+
+void OBSBasicStatusBar::LogOutputHealth(double cpuUsage)
+{
+	const uint64_t now = os_gettime_ns();
+	if (lastHealthLogTime && now - lastHealthLogTime < 30000000000ULL) {
+		return; // Bound diagnostics to one snapshot per 30 seconds, not one line per dropped frame.
+	}
+
+	OBSOutput stream = OBSGetStrongRef(streamOutput);
+	OBSOutput recording = OBSGetStrongRef(recordOutput);
+	const auto outputs = GetActiveStreamOutputs(stream);
+	const bool recordingActive = recording && obs_output_active(recording);
+	if (outputs.empty() && !recordingActive) {
+		lastHealthLogTime = 0;
+		return;
+	}
+	lastHealthLogTime = now;
+
+	os_proc_memory_usage_t memory = {};
+	const bool memoryAvailable = os_get_proc_memory_usage(&memory);
+	video_t *video = obs_get_video();
+	blog(LOG_INFO,
+	     "[OBS++ health] cpu=%.1f%% resident_mib=%.1f memory_available=%d fps=%.2f render_ms=%.2f "
+	     "render_lag=%u/%u main_encode_lag=%u/%u recording=%d streams=%zu",
+	     cpuUsage, double(memory.resident_size) / (1024.0 * 1024.0), memoryAvailable, obs_get_active_fps(),
+	     double(obs_get_average_frame_time_ns()) / 1000000.0, obs_get_lagged_frames(), obs_get_total_frames(),
+	     video_output_get_skipped_frames(video), video_output_get_total_frames(video), recordingActive,
+	     outputs.size());
+	for (const auto &output : outputs) {
+		blog(LOG_INFO,
+		     "[OBS++ health] output='%s' bytes=%llu network_dropped=%d total_frames=%d congestion=%.3f "
+		     "reconnecting=%d",
+		     output.name.c_str(), (unsigned long long)output.totalBytes, output.droppedFrames,
+		     output.totalFrames, output.congestion,
+		     output.reconnecting); // Counters reset on reconnect; existing lifecycle logs identify that boundary.
+	}
 }
 
 void OBSBasicStatusBar::UpdateCurrentFPS()

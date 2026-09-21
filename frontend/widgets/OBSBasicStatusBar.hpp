@@ -45,6 +45,7 @@ private:
 
 	std::map<std::string, uint64_t> lastBytesSentByOutput;
 	uint64_t lastBytesSentTime = 0;
+	uint64_t lastHealthLogTime = 0;
 
 	QPixmap excellentPixmap;
 	QPixmap goodPixmap;
@@ -76,6 +77,7 @@ private:
 	void UpdateRecordTime();
 	void UpdateRecordTimeLabel();
 	void UpdateDroppedFrames();
+	void LogOutputHealth(double cpuUsage);
 
 	static void OBSOutputReconnect(void *data, calldata_t *params);
 	static void OBSOutputReconnectSuccess(void *data, calldata_t *params);

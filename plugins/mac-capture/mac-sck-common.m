@@ -42,7 +42,10 @@ bool is_screen_capture_available(void)
             break;
     }
 
-    MACCAP_LOG(LOG_WARNING, "%s", errorMessage.UTF8String);
+    MACCAP_LOG(LOG_WARNING, "source='%s' display=%u type=%d audio_only=%d domain=%s code=%ld: %s",
+               obs_source_get_name(self.sc->source), self.sc->display,
+               self.sc->audio_only ? (int) self.sc->audio_capture_type : (int) self.sc->capture_type,
+               self.sc->audio_only, error.domain.UTF8String, (long) error.code, errorMessage.UTF8String);
 
     self.sc->capture_failed = true;
     obs_source_update_properties(self.sc->source);

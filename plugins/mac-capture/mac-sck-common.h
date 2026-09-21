@@ -57,6 +57,9 @@ struct API_AVAILABLE(macos(12.5)) screen_capture {
     IOSurfaceRef current, prev;
     bool capture_failed;
 
+    uint64_t texture_failures;
+    uint64_t last_texture_error_log_ns;
+
     pthread_mutex_t mutex;
 
     ScreenCaptureStreamType capture_type;

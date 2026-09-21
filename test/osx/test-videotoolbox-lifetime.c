@@ -1,6 +1,7 @@
 /* Standalone ownership regression test; includes the real encoder implementation.
  * No OBS instance, capture source, network output, or hardware encoder is started. */
 #include <obs-module.h>
+#include <util/platform.h>
 #include <VideoToolbox/VideoToolbox.h>
 #include <CoreMedia/CoreMedia.h>
 #include <stdio.h>
@@ -13,6 +14,26 @@ static CVPixelBufferPoolRef test_pool;
 static CVPixelBufferRef submitted_buffer;
 static OSStatus submission_status;
 static bool native_submission;
+static uint64_t test_time_ns = 1000000000ULL;
+static int callback_log_count;
+static char last_callback_log[1024];
+
+static uint64_t test_time(void)
+{
+	return test_time_ns;
+}
+
+static void capture_log(int level, const char *format, va_list args, void *parameter)
+{
+	(void)level;
+	(void)parameter;
+	char message[1024];
+	vsnprintf(message, sizeof(message), format, args);
+	if (strstr(message, "Callback failures:")) {
+		callback_log_count++;
+		snprintf(last_callback_log, sizeof(last_callback_log), "%s", message);
+	}
+}
 
 static CVPixelBufferPoolRef test_get_pool(VTCompressionSessionRef session)
 {
@@ -71,12 +92,14 @@ static const char *test_name(const obs_encoder_t *encoder)
 #define VTCompressionSessionCreate test_create
 #define obs_encoder_get_codec test_codec
 #define obs_encoder_get_name test_name
+#define os_gettime_ns test_time
 #include "../../plugins/mac-videotoolbox/encoder.c"
 #undef VTCompressionSessionGetPixelBufferPool
 #undef VTCompressionSessionEncodeFrame
 #undef VTCompressionSessionCreate
 #undef obs_encoder_get_codec
 #undef obs_encoder_get_name
+#undef os_gettime_ns
 
 static int failures;
 
@@ -104,8 +127,10 @@ static void test_full_queue(void)
 	assert(CVPixelBufferCreate(NULL, 16, 16, kCVPixelFormatType_32BGRA, NULL, &source) == noErr);
 	CFRetain(
 		source); // The old callback consumes one reference; keep another so both versions can be tested safely.
-	sample_encoded_callback(queue, source, noErr, 0, rejected);
+	struct vt_encoder encoder = {.queue = queue};
+	sample_encoded_callback(&encoder, source, noErr, 0, rejected);
 	check(CFGetRetainCount(rejected) == 1, "full queue releases the rejected sample");
+	check(encoder.callback_queue_rejections == 1, "full queue increments diagnostic rejection count");
 	CFIndex count = CFGetRetainCount(rejected);
 	while (count--)
 		CFRelease(rejected);
@@ -136,6 +161,27 @@ static void test_destroy_queue(void)
 	count = CFGetRetainCount(queue);
 	while (count--)
 		CFRelease(queue);
+}
+
+static void test_callback_logging(void)
+{
+	struct vt_encoder encoder = {0};
+	assert(CMSimpleQueueCreate(NULL, 2, &encoder.queue) == noErr);
+	callback_log_count = 0;
+	for (int i = 0; i < 100; i++)
+		sample_encoded_callback(&encoder, NULL, kVTVideoEncoderMalfunctionErr, 0, NULL);
+	check(callback_log_count == 1 && encoder.callback_errors == 100,
+	      "repeated callback errors produce one log and retain every failure count");
+	test_time_ns += 30000000000ULL;
+	sample_encoded_callback(&encoder, NULL, noErr, kVTEncodeInfo_Asynchronous | kVTEncodeInfo_FrameDropped, NULL);
+	check(callback_log_count == 2 && encoder.callback_dropped_frames == 1,
+	      "callback diagnostics resume after 30 seconds and detect combined dropped-frame flags");
+	check(strstr(last_callback_log, "ownership-test") && strstr(last_callback_log, "errors=100") &&
+		      strstr(last_callback_log, "dropped=1"),
+	      "callback log identifies the encoder and cumulative failures");
+	sample_encoded_callback(&encoder, NULL, noErr, 0, NULL);
+	check(callback_log_count == 2, "successful callbacks do not produce failure logs");
+	CFRelease(encoder.queue);
 }
 
 static void test_missing_pool(void)
@@ -216,7 +262,7 @@ static void test_native_encoding(void)
 		assert(CMSimpleQueueCreate(NULL, 100, &encoder->queue) == noErr);
 		CFDictionaryRef pixels = create_pixbuf_spec(encoder);
 		OSStatus result = VTCompressionSessionCreate(NULL, 64, 64, kCMVideoCodecType_H264, specification,
-							     pixels, NULL, sample_encoded_callback, encoder->queue,
+							     pixels, NULL, sample_encoded_callback, encoder,
 							     &encoder->session);
 		CFRelease(pixels);
 		assert(result == noErr);
@@ -248,12 +294,14 @@ static void test_native_encoding(void)
 
 int main(int argc, char **argv)
 {
+	base_set_log_handler(capture_log, NULL);
 	if (argc == 2 && strcmp(argv[1], "--creation-failure") == 0) {
 		struct vt_encoder encoder = {.vt_encoder_id = "invalid-for-test", .width = 16, .height = 16};
 		OSStatus status = create_encoder(&encoder);
 		return status == kVTAllocationFailedErr && encoder.session == NULL ? 0 : 1;
 	}
 	test_full_queue();
+	test_callback_logging();
 	test_destroy_queue();
 	test_missing_pool();
 	test_submission(kVTVideoEncoderMalfunctionErr);
