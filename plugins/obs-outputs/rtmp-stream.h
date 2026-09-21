@@ -69,6 +69,7 @@ struct rtmp_stream {
 
 	volatile bool connecting;
 	pthread_t connect_thread;
+	bool connect_thread_joinable; // The output owner reaps finished attempts; the worker never detaches itself.
 
 	volatile bool active;
 	volatile bool disconnected;

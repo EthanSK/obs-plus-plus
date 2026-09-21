@@ -100,17 +100,24 @@ static inline bool disconnected(struct rtmp_stream *stream)
 	return os_atomic_load_bool(&stream->disconnected);
 }
 
+static void join_connect_thread(struct rtmp_stream *stream)
+{
+	if (!stream->connect_thread_joinable)
+		return;
+
+	pthread_join(stream->connect_thread, NULL); // A self-detaching worker can strand a concurrent Stop join on macOS.
+	stream->connect_thread_joinable = false;
+}
+
 static void rtmp_stream_destroy(void *data)
 {
 	struct rtmp_stream *stream = data;
+	join_connect_thread(stream);
 
 	if (stopping(stream) && !connecting(stream)) {
 		pthread_join(stream->send_thread, NULL);
 
 	} else if (connecting(stream) || active(stream)) {
-		if (stream->connecting)
-			pthread_join(stream->connect_thread, NULL);
-
 		stream->stop_ts = 0;
 		os_event_signal(stream->stop_event);
 
@@ -207,8 +214,11 @@ static void rtmp_stream_stop(void *data, uint64_t ts)
 	if (stopping(stream) && ts != 0)
 		return;
 
-	if (connecting(stream))
-		pthread_join(stream->connect_thread, NULL);
+	const bool was_connecting = connecting(stream);
+	info("Stop requested: connecting=%d force=%d", was_connecting, ts == 0);
+	join_connect_thread(stream);
+	if (was_connecting)
+		info("Connection worker finished; continuing Stop");
 
 	stream->stop_ts = ts / 1000ULL;
 
@@ -1505,7 +1515,7 @@ static void *connect_thread(void *data)
 
 	if (!init_connect(stream)) {
 		obs_output_signal_stop(stream->output, OBS_OUTPUT_BAD_PATH);
-		return NULL;
+		goto finish;
 	}
 
 	// HDR streaming disabled for AV1
@@ -1518,7 +1528,7 @@ static void *connect_thread(void *data)
 
 			if (info->colorspace == VIDEO_CS_2100_HLG || info->colorspace == VIDEO_CS_2100_PQ) {
 				obs_output_signal_stop(stream->output, OBS_OUTPUT_HDR_DISABLED);
-				return NULL;
+				goto finish;
 			}
 		}
 	}
@@ -1530,9 +1540,7 @@ static void *connect_thread(void *data)
 		info("Connection to %s failed: %d", stream->path.array, ret);
 	}
 
-	if (!stopping(stream))
-		pthread_detach(stream->connect_thread);
-
+finish:
 	os_atomic_set_bool(&stream->connecting, false);
 	return NULL;
 }
@@ -1543,11 +1551,17 @@ static bool rtmp_stream_start(void *data)
 
 	if (!obs_output_can_begin_data_capture(stream->output, 0))
 		return false;
+	join_connect_thread(stream); // Reap the previous attempt before replacing its joinable handle on reconnect.
 	if (!obs_output_initialize_encoders(stream->output, 0))
 		return false;
 
 	os_atomic_set_bool(&stream->connecting, true);
-	return pthread_create(&stream->connect_thread, NULL, connect_thread, stream) == 0;
+	if (pthread_create(&stream->connect_thread, NULL, connect_thread, stream) != 0) {
+		os_atomic_set_bool(&stream->connecting, false);
+		return false;
+	}
+	stream->connect_thread_joinable = true;
+	return true;
 }
 
 static inline bool add_packet(struct rtmp_stream *stream, struct encoder_packet *packet)

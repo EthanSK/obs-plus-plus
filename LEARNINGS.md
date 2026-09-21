@@ -109,3 +109,26 @@ Run `python3 test/osx/test-output-health-logging.py` for deterministic coverage 
 the actual health logger/enumerator with read-only OBS stubs; the native ownership
 suite additionally tests callback/texture failure throttling. Neither substitutes
 for verification of the installed build after a safe restart.
+
+## Keep RTMP connection-worker ownership separate from running state
+
+Stopping during reconnection can call `pthread_join(connect_thread)` while that
+worker is still connecting. The old worker detached itself before returning
+because Stop had not yet set the stop event. On macOS, that detach can strand the
+waiting join indefinitely: a live hang sample showed the UI inside this join,
+while network sending and recording continued. A native join/self-detach probe
+reproduced the hang without running OBS or changing network settings.
+
+Keep connection workers joinable. Reap the previous attempt before replacing its
+handle on reconnect, and reap it on Stop and destruction, including early
+connection errors. The joinable flag records owned thread resources, not whether
+the worker is still running. Always clear the separate connecting flag on every
+exit and after thread-creation failure. Event logs before and after the Stop wait
+identify this boundary without adding per-frame logs or a watchdog.
+
+Run `python3 test/osx/test-rtmp-connect-stop.py` for native thread coverage of the
+Stop/finish overlap, repeated attempts, early errors and creation failure. This
+fix does not remove the existing wait for an in-flight network connection or
+prove that Wi-Fi is stable. Correlate RTMP timestamps with macOS Wi-Fi roam events
+and bounded gateway latency checks before attributing disconnects to an encoder
+or memory leak; a reconnect alone is not evidence of either.
