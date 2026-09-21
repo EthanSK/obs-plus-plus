@@ -152,4 +152,10 @@ to check the label.
 When reconfiguration reports imported library include paths inside a removed
 Xcode SDK, refresh only the affected CMake cache entries (CURL, Iconv, OpenGL and
 ZLIB here) against the SDK reported by `xcrun --sdk macosx --show-sdk-path`.
+Also set `CMAKE_OSX_SYSROOT` to that SDK and check CMake's generated compiler
+metadata. If its implicit include directories still name the removed SDK, move
+only the stale `CMakeCCompiler.cmake` and `CMakeCXXCompiler.cmake` files into a
+recoverable backup and reconfigure to rediscover them. Otherwise CMake can put
+the new SDK's C headers before libc++ and break `<cstddef>` or `<cfenv>`. Preserve
+the build cache and its existing feature, dependency and signing choices.
 Do not change source include paths or recreate the removed SDK directory.
