@@ -403,6 +403,7 @@ static OSStatus session_set_colorspace(VTCompressionSessionRef session, enum vid
 void sample_encoded_callback(void *data, void *source, OSStatus status, VTEncodeInfoFlags info_flags,
 			     CMSampleBufferRef buffer)
 {
+	UNUSED_PARAMETER(source);
 
 	if (status != noErr) {
 		log_osstatus(LOG_ERROR, NULL, "encoder callback", status);
@@ -414,12 +415,11 @@ void sample_encoded_callback(void *data, void *source, OSStatus status, VTEncode
 	}
 
 	CMSimpleQueueRef queue = data;
-	CVPixelBufferRef pixbuf = source;
 	if (buffer != NULL) {
 		CFRetain(buffer);
-		CMSimpleQueueEnqueue(queue, buffer);
+		if (CMSimpleQueueEnqueue(queue, buffer) != noErr)
+			CFRelease(buffer); // A full queue does not take ownership of the retained sample.
 	}
-	CFRelease(pixbuf);
 }
 
 static inline CFDictionaryRef create_encoder_spec(const char *vt_encoder_id)
@@ -513,6 +513,9 @@ static OSStatus create_encoder(struct vt_encoder *enc)
 
 	CFRelease(encoder_spec);
 	CFRelease(pixbuf_spec);
+	if (code != noErr)
+		return code;
+	enc->session = s; // Keep failed configuration/prepare sessions reachable by vt_destroy.
 
 	CFBooleanRef b = NULL;
 	code = VTSessionCopyProperty(s, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, NULL, &b);
@@ -610,8 +613,6 @@ static OSStatus create_encoder(struct vt_encoder *enc)
 		return code;
 	}
 
-	enc->session = s;
-
 	return noErr;
 }
 
@@ -623,6 +624,12 @@ static void vt_destroy(void *data)
 		if (enc->session != NULL) {
 			VTCompressionSessionInvalidate(enc->session);
 			CFRelease(enc->session);
+		}
+		if (enc->queue != NULL) { // Invalidation ends callbacks; CMSimpleQueue does not release its elements.
+			CMSampleBufferRef buffer;
+			while ((buffer = (CMSampleBufferRef)CMSimpleQueueDequeue(enc->queue)) != NULL)
+				CFRelease(buffer);
+			CFRelease(enc->queue);
 		}
 		da_free(enc->packet_data);
 		da_free(enc->extra_data);
@@ -1066,7 +1073,7 @@ bool get_cached_pixel_buffer(struct vt_encoder *enc, CVPixelBufferRef *buf)
 	OSStatus code;
 	CVPixelBufferPoolRef pool = VTCompressionSessionGetPixelBufferPool(enc->session);
 	if (!pool)
-		return kCVReturnError;
+		return false;
 
 	CVPixelBufferRef pixbuf;
 	code = CVPixelBufferPoolCreatePixelBuffer(NULL, pool, &pixbuf);
@@ -1151,10 +1158,11 @@ static bool vt_encode(void *data, struct encoder_frame *frame, struct encoder_pa
 		goto fail;
 	}
 
-	code = VTCompressionSessionEncodeFrame(enc->session, pixbuf, pts, dur, NULL, pixbuf, NULL);
+	code = VTCompressionSessionEncodeFrame(enc->session, pixbuf, pts, dur, NULL, NULL, NULL);
 	if (code != noErr) {
 		goto fail;
 	}
+	CFRelease(pixbuf); // VideoToolbox retains the input while needed, including asynchronous and failed callbacks.
 
 	CMSampleBufferRef buffer = (CMSampleBufferRef)CMSimpleQueueDequeue(enc->queue);
 
@@ -1166,6 +1174,8 @@ static bool vt_encode(void *data, struct encoder_frame *frame, struct encoder_pa
 	return parse_sample(enc, buffer, packet, off);
 
 fail:
+	if (pixbuf != NULL)
+		CFRelease(pixbuf);
 	return false;
 }
 

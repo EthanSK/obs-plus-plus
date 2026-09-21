@@ -338,7 +338,7 @@ static void display_capture_video_tick(void *data, float seconds)
     pthread_mutex_unlock(&dc->mutex);
 
     if (prev_prev == dc->prev)
-        return;
+        goto cleanup; // The callback retained the repeated surface too; release the replaced ownership.
 
     if (requires_window(dc->crop) && !dc->on_screen)
         goto cleanup;

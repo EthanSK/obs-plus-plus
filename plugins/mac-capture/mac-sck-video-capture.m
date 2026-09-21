@@ -340,7 +340,7 @@ API_AVAILABLE(macos(12.5)) static void sck_video_capture_tick(void *data, float 
     pthread_mutex_unlock(&sc->mutex);
 
     if (prev_prev == sc->prev)
-        return;
+        goto cleanup; // The callback retained the repeated surface too; release the replaced ownership.
 
     obs_enter_graphics();
     if (sc->tex)
@@ -349,6 +349,7 @@ API_AVAILABLE(macos(12.5)) static void sck_video_capture_tick(void *data, float 
         sc->tex = gs_texture_create_from_iosurface(sc->prev);
     obs_leave_graphics();
 
+cleanup:
     if (prev_prev) {
         IOSurfaceDecrementUseCount(prev_prev);
         CFRelease(prev_prev);
