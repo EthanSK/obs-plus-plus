@@ -132,3 +132,24 @@ fix does not remove the existing wait for an in-flight network connection or
 prove that Wi-Fi is stable. Correlate RTMP timestamps with macOS Wi-Fi roam events
 and bounded gateway latency checks before attributing disconnects to an encoder
 or memory leak; a reconnect alone is not evidence of either.
+
+## Show the local release date, not upstream or launch time
+
+The title suffix uses the local source commit's calendar date, embedded by CMake
+in `ui-config.h`; it does not query Git, GitHub or the clock while OBS is running.
+The Git HEAD reflog is a configure dependency so a later local commit updates the
+metadata during an incremental build, including plug-in-only changes. Build and
+install a committed release; a source archive without Git must explicitly supply
+`OBS_PLUS_PLUS_RELEASE_DATE` in ISO date form. Do not replace it with the app's
+launch time, installation file timestamp or an upstream OBS tag date.
+
+`test/osx/test-release-title.py` checks the actual title method with Qt, preserving
+Studio/safe/portable/profile/scene text and appending the date once, plus CMake
+metadata refresh after a new source commit. The installed title still requires
+an authorized restart and native UI readback; do not interrupt live outputs just
+to check the label.
+
+When reconfiguration reports imported library include paths inside a removed
+Xcode SDK, refresh only the affected CMake cache entries (CURL, Iconv, OpenGL and
+ZLIB here) against the SDK reported by `xcrun --sdk macosx --show-sdk-path`.
+Do not change source include paths or recreate the removed SDK directory.
