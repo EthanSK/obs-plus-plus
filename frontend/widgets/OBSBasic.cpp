@@ -57,7 +57,7 @@
 #include <qt-wrappers.hpp>
 
 #include <QActionGroup>
-#include <QDate>
+#include <QDateTime>
 #include <QLocale>
 #include <QThread>
 #include <QWidgetAction>
@@ -2143,9 +2143,10 @@ void OBSBasic::UpdateTitleBar()
 
 	name << " - " << Str("TitleBar.Profile") << ": " << profile;
 	name << " - " << Str("TitleBar.Scenes") << ": " << sceneCollection;
-	const QString releaseDate = QLocale(QLocale::English).toString(
-		QDate::fromString(QStringLiteral(OBS_PLUS_PLUS_RELEASE_DATE), Qt::ISODate), "d MMMM yyyy");
-	name << " - " << QT_TO_UTF8(QTStr("TitleBar.UpdateReleasedOn").arg(releaseDate));
+	const QString releaseDateTime = QLocale(QLocale::English).toString(
+		QDateTime::fromString(QStringLiteral(OBS_PLUS_PLUS_RELEASE_TIMESTAMP), Qt::ISODate).toLocalTime(),
+		"d MMMM yyyy 'at' HH:mm t");
+	name << " - " << QT_TO_UTF8(QTStr("TitleBar.UpdateReleasedOn").arg(releaseDateTime));
 
 	setWindowTitle(QT_UTF8(name.str().c_str()));
 }

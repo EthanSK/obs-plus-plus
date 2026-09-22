@@ -13,7 +13,7 @@ qt = next((root / ".deps").glob("obs-deps-qt6-*/lib/QtCore.framework")).parent
 
 fixture = r'''
 #include <QCoreApplication>
-#include <QDate>
+#include <QDateTime>
 #include <QLocale>
 #include <QString>
 #include <cassert>
@@ -21,7 +21,7 @@ fixture = r'''
 #include <sstream>
 #include <string>
 using namespace std;
-#define OBS_PLUS_PLUS_RELEASE_DATE "2026-09-21"
+#define OBS_PLUS_PLUS_RELEASE_TIMESTAMP "2026-09-21T19:07:30+01:00"
 #define QT_UTF8(value) QString::fromUtf8(value)
 #define QT_TO_UTF8(value) (value).toUtf8().constData()
 bool safe_mode = false;
@@ -54,6 +54,8 @@ fixture += method
 fixture += r'''
 int main(int argc, char **argv) {
     QCoreApplication application(argc, argv);
+    assert(argc == 2);
+    const QString releaseSuffix = QString(" - Update released on ") + argv[1];
     QLocale::setDefault(QLocale::French);
     OBSBasic window;
     for (int flags = 0; flags < 8; ++flags) {
@@ -66,15 +68,17 @@ int main(int argc, char **argv) {
         expected += "32.2.2-obs-plus-plus";
         if (flags & 2) expected += " (SAFE MODE)";
         if (flags & 4) expected += " - Portable Mode";
-        expected += " - Profile: Coffee & coding - Scenes: Scènes - Update released on 21 September 2026";
+        expected += " - Profile: Coffee & coding - Scenes: Scènes" + releaseSuffix;
+        if (window.title != expected)
+            std::cerr << "Expected: " << expected.toStdString() << "\nActual: " << window.title.toStdString() << "\n";
         assert(window.title == expected);
     }
     profile = "3000AD Music";
     collection = "3000ad v3 new";
     window.UpdateTitleBar();
-    assert(window.title.endsWith(" - Profile: 3000AD Music - Scenes: 3000ad v3 new - Update released on 21 September 2026"));
+    assert(window.title.endsWith(" - Profile: 3000AD Music - Scenes: 3000ad v3 new" + releaseSuffix));
     assert(window.title.count("Update released on") == 1);
-    std::cout << "PASS: 8 title modes, profile/collection update, human-readable fixed release date\n";
+    std::cout << "PASS: 8 title modes, profile/collection update, " << argv[1] << "\n";
 }
 '''
 
@@ -84,7 +88,13 @@ with tempfile.TemporaryDirectory(prefix="obs-release-title-") as temporary:
     subprocess.run(["c++", "-std=c++17", "-fPIC", "-F" + str(qt), "-I" + str(qt / "QtCore.framework/Headers"),
                     "-framework", "QtCore", "-Wl,-rpath," + str(qt), str(directory / "title.cpp"),
                     "-o", str(directory / "title")], check=True)
-    subprocess.run([str(directory / "title")], check=True)
+    for timezone, expected in (
+        ("Europe/London", "21 September 2026 at 19:07 GMT+1"),
+        ("UTC", "21 September 2026 at 18:07 GMT"),
+        ("America/New_York", "21 September 2026 at 14:07 EDT"),
+        ("Pacific/Auckland", "22 September 2026 at 06:07 GMT+12"),
+    ):
+        subprocess.run([str(directory / "title"), expected], env=os.environ | {"TZ": timezone}, check=True)
     subprocess.run(["git", "init", "-q", str(directory)], check=True)
     environment = os.environ | {"GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
                                 "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid"}
@@ -92,13 +102,18 @@ with tempfile.TemporaryDirectory(prefix="obs-release-title-") as temporary:
         'cmake_minimum_required(VERSION 3.28)\nproject(release_test NONE)\n'
         f'include("{root / "frontend/cmake/obs-plus-plus-release.cmake"}")\n'
         'configure_file(date.in date.txt @ONLY)\n')
-    (directory / "date.in").write_text("@OBS_PLUS_PLUS_RELEASE_DATE@\n")
-    for date in ("2025-12-31", "2026-09-21"):
-        environment |= {"GIT_AUTHOR_DATE": date + "T12:00:00+0000", "GIT_COMMITTER_DATE": date + "T12:00:00+0000"}
+    (directory / "date.in").write_text("@OBS_PLUS_PLUS_RELEASE_TIMESTAMP@\n")
+    for index, timestamp in enumerate(("2025-12-31T12:00:00+00:00", "2026-09-21T19:07:30+01:00", "2026-09-21T19:45:00+01:00")):
+        environment |= {"GIT_AUTHOR_DATE": timestamp, "GIT_COMMITTER_DATE": timestamp}
         subprocess.run(["git", "-C", str(directory), "commit", "-q", "--allow-empty", "-m", "release fixture"],
                        env=environment, check=True)
         command = (["cmake", "-S", str(directory), "-B", str(directory / "build"), "-G", "Unix Makefiles"]
-                   if date == "2025-12-31" else ["cmake", "--build", str(directory / "build")])
+                   if index == 0 else ["cmake", "--build", str(directory / "build")])
         subprocess.run(command, check=True, stdout=subprocess.PIPE)
-        assert (directory / "build/date.txt").read_text().strip() == date
-    print("PASS: release date follows the source commit and refreshes on incremental build")
+        assert (directory / "build/date.txt").read_text().strip() == timestamp
+    for timestamp in ("2026-09-21", "2026-09-21T19:07:30", "invalid"):
+        result = subprocess.run(["cmake", "-S", str(directory), "-B", str(directory / "invalid"),
+                                 "-DOBS_PLUS_PLUS_RELEASE_TIMESTAMP=" + timestamp], capture_output=True)
+        assert result.returncode != 0
+        assert b"must be an ISO 8601 timestamp with a timezone" in b" ".join(result.stderr.split())
+    print("PASS: source timestamp, same-day incremental refresh, missing timezone rejection")

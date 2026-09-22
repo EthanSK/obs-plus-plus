@@ -135,17 +135,20 @@ or memory leak; a reconnect alone is not evidence of either.
 
 ## Show the local release date, not upstream or launch time
 
-The title suffix uses the local source commit's calendar date, embedded by CMake
+The title suffix uses the local source commit's full timestamp, embedded by CMake
 in `ui-config.h`; it does not query Git, GitHub or the clock while OBS is running.
 The Git HEAD reflog is a configure dependency so a later local commit updates the
 metadata during an incremental build, including plug-in-only changes. Build and
 install a committed release; a source archive without Git must explicitly supply
-`OBS_PLUS_PLUS_RELEASE_DATE` in ISO date form. Do not replace it with the app's
+`OBS_PLUS_PLUS_RELEASE_TIMESTAMP` in ISO 8601 form with a timezone. Display it in
+the Mac's local time, including hours, minutes and timezone so same-day releases
+can be distinguished. Do not replace it with the app's
 launch time, installation file timestamp or an upstream OBS tag date.
 
 `test/osx/test-release-title.py` checks the actual title method with Qt, preserving
-Studio/safe/portable/profile/scene text and appending the date once, plus CMake
-metadata refresh after a new source commit. The installed title still requires
+Studio/safe/portable/profile/scene text and appending the date and time once,
+including timezone conversion and date rollover, plus CMake metadata refresh
+after a new same-day source commit. The installed title still requires
 an authorized restart and native UI readback; do not interrupt live outputs just
 to check the label.
 
