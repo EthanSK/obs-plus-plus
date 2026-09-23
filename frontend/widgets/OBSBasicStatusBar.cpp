@@ -767,7 +767,7 @@ void OBSBasicStatusBar::showMessage(const QString &message, int timeout)
 void OBSBasicStatusBar::showRecordingSaved(const QString &path)
 {
 	const QString message = QTStr("Basic.StatusBar.RecordingSavedTo").arg(path);
-	showMessage(message, 10000);
+	showMessage(message, 30000);
 #ifdef __APPLE__
 	const QString link = QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded).toHtmlEscaped();
 	statusWidget->ui->message->setTextFormat(Qt::RichText);
