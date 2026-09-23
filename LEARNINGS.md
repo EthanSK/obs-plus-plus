@@ -41,6 +41,15 @@ verified exact-file selection and the existing ten-second timeout without
 interrupting OBS. This is not installed-runtime acceptance; installation was
 deferred while the existing OBS recording was active.
 
+For a later executable-only OBS++ update, replacing the signed binary alone
+invalidated the installed app's Info.plist signature; replacing its Info.plist
+as well still invalidated the resource seal. Preserve a verified full-app
+rollback, copy the built executable and matching Info.plist, then re-sign the
+outer installed bundle with its existing entitlements. Deep-verify the result
+and compare installed plug-ins against the rollback before relaunching. This
+keeps newer installed third-party plug-ins intact instead of replacing the
+whole bundle with the build output.
+
 ## Balance macOS capture and encoder ownership on failure and teardown
 
 VideoToolbox retains submitted input buffers for as long as encoding needs them.
