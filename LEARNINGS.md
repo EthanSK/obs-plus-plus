@@ -1,5 +1,24 @@
 # Verified project lessons
 
+## Keep the Metal drawable pool around the full preview frame
+
+OBS upstream merged PR #13664 into its 33.0 development line on 17 September
+2026, but this OBS++ checkout based on 32.2.2 did not contain it. The
+`CVDisplayLink` callback in `MetalDevice.blitSwapChains()` acquires
+`CAMetalDrawable` objects through `nextDrawable()`; an autorelease pool starting
+after that call cannot drain those drawables. Keep the upstream change together:
+the pool encloses drawable acquisition, blit, presentation and command-buffer
+commit. Present each collected drawable after ending the encoder and before
+committing the buffer.
+
+The August 2026 Metal incident grew to tens of gigabytes of IOSurfaces even
+after recording stopped; OpenGL avoided that observed growth at a preview cost.
+This focused backport addresses that path, not the separate September
+WindowServer IOSurface exhaustion or capture-card USB/device-ID failures.
+Build success does not establish installed-runtime safety: switch from OpenGL
+only after live outputs are idle, then verify rendering and bounded
+`IOSurfaceSharedEventReference`/drawable growth over a representative session.
+
 ## Verify the installed executable separately from capture plug-ins
 
 The combined stream-status change (`3022d4b9d`) lives in the OBS++ executable,
