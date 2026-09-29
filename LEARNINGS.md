@@ -113,13 +113,15 @@ the growing surface group before attributing the system-wide leak to that app.
 ## Keep failure diagnostics bounded and distinguish their scope
 
 `[OBS++ health]` snapshots use the existing CPU timer, which runs independently
-of the built-in stream and also covers Aitum-only streaming. While streaming or
-recording, snapshots are limited to every 30 seconds: process CPU/resident memory,
-rendering and main-canvas encoding counters, plus each stream's cumulative bytes,
-network drops, frame count, congestion and reconnect flag. Compare successive
-timestamped snapshots for rates, respecting counter resets at reconnects. Aitum
-recordings are not counted as network streams. These metrics do not identify the
-owner of system-wide IOSurface allocations.
+of the built-in stream and also covers Aitum-only streaming. Snapshots continue
+while all outputs are idle because the August Metal drawable leak persisted after
+recording stopped. Limit them to every 30 seconds: process CPU/resident memory,
+macOS physical footprint, rendering and main-canvas encoding counters, plus each
+stream's cumulative bytes, network drops, frame count, congestion and reconnect
+flag. Compare successive timestamped snapshots for rates, respecting counter
+resets at reconnects. Aitum recordings are not counted as network streams. Process
+footprint can expose retained OBS drawables that resident memory misses, but
+these metrics do not identify the owner of system-wide IOSurface allocations.
 
 Reuse the CPU timer's existing sample: `GetCPUUsage()` changes its measurement
 baseline, so a second immediate query produces a misleading diagnostic value.

@@ -14,6 +14,7 @@ fixture = r'''
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <mach/mach.h>
 #include <string>
 #include <vector>
 struct QString {
@@ -91,6 +92,8 @@ int main() {
     bar.LogOutputHealth();
     assert(logs.size() == 3);
     assert(logs[0].find("resident_mib=512.0 memory_available=1") != std::string::npos);
+    assert(logs[0].find("footprint_mib=") != std::string::npos);
+    assert(logs[0].find("footprint_available=1") != std::string::npos);
     assert(logs[0].find("render_lag=3/301 main_encode_lag=2/300 recording=1 streams=2") != std::string::npos);
     assert(logs[1].find("output='adv_stream' bytes=12345 network_dropped=12") != std::string::npos);
     assert(logs[2].find("output='Aitum Stream Suite Output Twitch'") != std::string::npos);
@@ -107,9 +110,9 @@ int main() {
     assert(logs.size() == 1 && logs[0].find("recording=1 streams=0") != std::string::npos);
     puts("PASS: recording-only health is retained");
     logs.clear(); record.active = false; now += 30000000000ULL; bar.LogOutputHealth();
-    assert(logs.empty() && bar.lastHealthLogTime == 0);
-    puts("PASS: no periodic health logs while all outputs are idle");
-    record.active = true; memory_available = false; bar.LogOutputHealth();
+    assert(logs.size() == 1 && logs[0].find("recording=0 streams=0") != std::string::npos);
+    puts("PASS: periodic memory health continues while all outputs are idle");
+    logs.clear(); record.active = true; memory_available = false; now += 30000000000ULL; bar.LogOutputHealth();
     assert(logs.size() == 1 && logs[0].find("memory_available=0") != std::string::npos);
     puts("PASS: memory-query failure is explicitly marked unavailable");
 }

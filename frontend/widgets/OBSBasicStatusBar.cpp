@@ -10,6 +10,10 @@
 #include <QStringList>
 #include <QUrl>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
+
 #include "moc_OBSBasicStatusBar.cpp"
 
 static constexpr int bitrateUpdateSeconds = 2;
@@ -326,19 +330,27 @@ void OBSBasicStatusBar::LogOutputHealth(double cpuUsage)
 	OBSOutput recording = OBSGetStrongRef(recordOutput);
 	const auto outputs = GetActiveStreamOutputs(stream);
 	const bool recordingActive = recording && obs_output_active(recording);
-	if (outputs.empty() && !recordingActive) {
-		lastHealthLogTime = 0;
-		return;
-	}
-	lastHealthLogTime = now;
+	lastHealthLogTime = now; // The Metal drawable leak continued after recording stopped, so keep sampling while idle.
 
 	os_proc_memory_usage_t memory = {};
 	const bool memoryAvailable = os_get_proc_memory_usage(&memory);
+#ifdef __APPLE__
+	task_vm_info_data_t vmInfo = {};
+	mach_msg_type_number_t vmInfoCount = TASK_VM_INFO_COUNT;
+	const bool footprintAvailable = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmInfo,
+						    &vmInfoCount) == KERN_SUCCESS;
+	const double footprintMiB = footprintAvailable ? double(vmInfo.phys_footprint) / (1024.0 * 1024.0) : 0.0;
+#else
+	const bool footprintAvailable = false;
+	const double footprintMiB = 0.0;
+#endif
 	video_t *video = obs_get_video();
 	blog(LOG_INFO,
-	     "[OBS++ health] cpu=%.1f%% resident_mib=%.1f memory_available=%d fps=%.2f render_ms=%.2f "
+	     "[OBS++ health] cpu=%.1f%% resident_mib=%.1f memory_available=%d footprint_mib=%.1f "
+	     "footprint_available=%d fps=%.2f render_ms=%.2f "
 	     "render_lag=%u/%u main_encode_lag=%u/%u recording=%d streams=%zu",
-	     cpuUsage, double(memory.resident_size) / (1024.0 * 1024.0), memoryAvailable, obs_get_active_fps(),
+	     cpuUsage, double(memory.resident_size) / (1024.0 * 1024.0), memoryAvailable, footprintMiB,
+	     footprintAvailable, obs_get_active_fps(),
 	     double(obs_get_average_frame_time_ns()) / 1000000.0, obs_get_lagged_frames(), obs_get_total_frames(),
 	     video_output_get_skipped_frames(video), video_output_get_total_frames(video), recordingActive,
 	     outputs.size());
