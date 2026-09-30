@@ -52,6 +52,7 @@ struct coreaudio_data {
 	bool enable_downmix;
 
 	pthread_t reconnect_thread;
+	bool reconnect_thread_joinable;
 	os_event_t *exit_event;
 	volatile bool reconnecting;
 	unsigned long retry_time;
@@ -109,10 +110,11 @@ static bool find_device_id_by_uid(struct coreaudio_data *ca)
 	cf_uid = CFStringCreateWithCString(NULL, ca->device_uid, kCFStringEncodingUTF8);
 
 	if (ca->default_device) {
+		ca->device_id = kAudioObjectUnknown;
 		addr.mSelector = kAudioHardwarePropertyDefaultInputDevice;
 		stat = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, qual_size, &qual, &size,
 						  &ca->device_id);
-		success = (stat == noErr);
+		success = (stat == noErr && ca->device_id != kAudioObjectUnknown);
 	} else {
 		success = coreaudio_get_device_id(cf_uid, &ca->device_id);
 	}
@@ -454,8 +456,6 @@ static void *reconnect_thread(void *param)
 {
 	struct coreaudio_data *ca = param;
 
-	ca->reconnecting = true;
-
 	while (os_event_timedwait(ca->exit_event, ca->retry_time) == ETIMEDOUT) {
 		if (coreaudio_init(ca))
 			break;
@@ -473,12 +473,21 @@ static void coreaudio_begin_reconnect(struct coreaudio_data *ca)
 	if (ca->reconnecting)
 		return;
 
+	if (ca->reconnect_thread_joinable) { // A completed worker still owns pthread resources until joined.
+		pthread_join(ca->reconnect_thread, NULL);
+		ca->reconnect_thread_joinable = false;
+	}
+	ca->reconnecting = true; // Publish running state before creation so another notification cannot replace the new handle.
 	ret = pthread_create(&ca->reconnect_thread, NULL, reconnect_thread, ca);
-	if (ret != 0)
+	if (ret != 0) {
+		ca->reconnecting = false;
 		blog(LOG_WARNING,
 		     "[coreaudio_begin_reconnect] failed to "
 		     "create thread, error code: %d",
 		     ret);
+	} else {
+		ca->reconnect_thread_joinable = true;
+	}
 }
 
 static OSStatus notification_callback(AudioObjectID id, UInt32 num_addresses,
@@ -584,6 +593,8 @@ static bool coreaudio_get_device_name(struct coreaudio_data *ca)
 	}
 
 	name = cfstr_copy_cstr(cf_name, kCFStringEncodingUTF8);
+	if (cf_name)
+		CFRelease(cf_name); // The property owns this reference even when UTF-8 conversion fails.
 	if (!name) {
 		blog(LOG_WARNING, "[coreaudio_get_device_name] failed to "
 				  "convert name to cstr for some reason");
@@ -592,9 +603,6 @@ static bool coreaudio_get_device_name(struct coreaudio_data *ca)
 
 	bfree(ca->device_name);
 	ca->device_name = name;
-
-	if (cf_name)
-		CFRelease(cf_name);
 
 	return true;
 }
@@ -607,7 +615,8 @@ static bool coreaudio_start(struct coreaudio_data *ca)
 		return true;
 
 	stat = AudioOutputUnitStart(ca->unit);
-	return ca_success(stat, ca, "coreaudio_start", "start audio");
+	ca->active = ca_success(stat, ca, "coreaudio_start", "start audio"); // Disconnect cleanup must stop a started AudioUnit.
+	return ca->active;
 }
 
 static void coreaudio_stop(struct coreaudio_data *ca)
@@ -757,9 +766,11 @@ static const char *coreaudio_output_getname(void *unused)
 
 static void coreaudio_shutdown(struct coreaudio_data *ca)
 {
-	if (ca->reconnecting) {
+	if (ca->reconnect_thread_joinable) { // Join finished workers too before replacing settings or freeing their context.
 		os_event_signal(ca->exit_event);
 		pthread_join(ca->reconnect_thread, NULL);
+		ca->reconnect_thread_joinable = false;
+		ca->reconnecting = false;
 		os_event_reset(ca->exit_event);
 	}
 

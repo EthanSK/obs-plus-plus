@@ -321,6 +321,8 @@ void OBSBasicStatusBar::UpdateCPUUsage()
 
 void OBSBasicStatusBar::LogOutputHealth(double cpuUsage)
 {
+	if (!obs_initialized())
+		return; // The CPU timer can run before core startup; output enumeration requires a live OBS core.
 	const uint64_t now = os_gettime_ns();
 	if (lastHealthLogTime && now - lastHealthLogTime < 30000000000ULL) {
 		return; // Bound diagnostics to one snapshot per 30 seconds, not one line per dropped frame.
@@ -344,16 +346,19 @@ void OBSBasicStatusBar::LogOutputHealth(double cpuUsage)
 	const bool footprintAvailable = false;
 	const double footprintMiB = 0.0;
 #endif
-	video_t *video = obs_get_video();
+	struct obs_video_info videoInfo = {};
+	const bool mainVideoAvailable = obs_get_video_info(&videoInfo);
+	video_t *video = mainVideoAvailable ? obs_get_video() : nullptr;
 	blog(LOG_INFO,
 	     "[OBS++ health] cpu=%.1f%% resident_mib=%.1f memory_available=%d footprint_mib=%.1f "
 	     "footprint_available=%d fps=%.2f render_ms=%.2f "
-	     "render_lag=%u/%u main_encode_lag=%u/%u recording=%d streams=%zu",
+	     "render_lag=%u/%u main_encode_lag=%u/%u recording=%d streams=%zu main_video_available=%d",
 	     cpuUsage, double(memory.resident_size) / (1024.0 * 1024.0), memoryAvailable, footprintMiB,
-	     footprintAvailable, obs_get_active_fps(),
-	     double(obs_get_average_frame_time_ns()) / 1000000.0, obs_get_lagged_frames(), obs_get_total_frames(),
-	     video_output_get_skipped_frames(video), video_output_get_total_frames(video), recordingActive,
-	     outputs.size());
+	     footprintAvailable, mainVideoAvailable ? obs_get_active_fps() : 0.0,
+	     mainVideoAvailable ? double(obs_get_average_frame_time_ns()) / 1000000.0 : 0.0,
+	     mainVideoAvailable ? obs_get_lagged_frames() : 0, mainVideoAvailable ? obs_get_total_frames() : 0,
+	     video ? video_output_get_skipped_frames(video) : 0, video ? video_output_get_total_frames(video) : 0,
+	     recordingActive, outputs.size(), video != nullptr); // Startup can fail before video exists; mark unavailable counters instead of dereferencing null.
 	for (const auto &output : outputs) {
 		blog(LOG_INFO,
 		     "[OBS++ health] output='%s' bytes=%llu network_dropped=%d total_frames=%d congestion=%.3f "

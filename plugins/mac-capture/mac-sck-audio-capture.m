@@ -27,6 +27,7 @@ API_AVAILABLE(macos(13.0)) static void destroy_audio_screen_stream(struct screen
     }
 
     os_event_destroy(sc->stream_start_completed);
+    sc->stream_start_completed = NULL;
 }
 
 API_AVAILABLE(macos(13.0)) static void sck_audio_capture_destroy(void *data)
@@ -38,7 +39,7 @@ API_AVAILABLE(macos(13.0)) static void sck_audio_capture_destroy(void *data)
 
     destroy_audio_screen_stream(sc);
 
-    if (sc->shareable_content) {
+    if (sc->shareable_content_available) { // Failed or pending inventory requests still own the semaphore and callback context.
         os_sem_wait(sc->shareable_content_available);
         [sc->shareable_content release];
         os_sem_destroy(sc->shareable_content_available);
@@ -57,10 +58,7 @@ API_AVAILABLE(macos(13.0)) static void sck_audio_capture_destroy(void *data)
 API_AVAILABLE(macos(13.0)) static bool init_audio_screen_stream(struct screen_capture *sc)
 {
     SCContentFilter *content_filter;
-    if (sc->capture_failed) {
-        sc->capture_failed = false;
-        obs_source_update_properties(sc->source);
-    }
+    sc->capture_failed = true; // Failed replacement streams must remain retryable, like video capture.
 
     sc->stream_properties = [[SCStreamConfiguration alloc] init];
     os_sem_wait(sc->shareable_content_available);
@@ -74,16 +72,23 @@ API_AVAILABLE(macos(13.0)) static bool init_audio_screen_stream(struct screen_ca
         return nil;
     };
 
+    SCDisplay *target_display = get_target_display();
+    if (!target_display) { // A disconnected display or failed inventory refresh cannot construct a valid audio filter.
+        MACCAP_ERR("init_audio_screen_stream: Invalid target display ID: %u", sc->display);
+        os_sem_post(sc->shareable_content_available);
+        sc->disp = NULL;
+        os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
+        obs_source_update_properties(sc->source);
+        return true;
+    }
+
     switch (sc->audio_capture_type) {
         case ScreenCaptureAudioDesktopStream: {
-            SCDisplay *target_display = get_target_display();
-
             NSArray *empty = [[NSArray alloc] init];
             content_filter = [[SCContentFilter alloc] initWithDisplay:target_display excludingWindows:empty];
             [empty release];
         } break;
         case ScreenCaptureAudioApplicationStream: {
-            SCDisplay *target_display = get_target_display();
             SCRunningApplication *target_application = nil;
             for (SCRunningApplication *application in sc->shareable_content.applications) {
                 if ([application.bundleIdentifier isEqualToString:sc->application_id]) {
@@ -113,6 +118,7 @@ API_AVAILABLE(macos(13.0)) static bool init_audio_screen_stream(struct screen_ca
     if (!did_get_audio_info) {
         MACCAP_ERR("init_audio_screen_stream: No audio configured, returning %d\n", did_get_audio_info);
         [content_filter release];
+        obs_source_update_properties(sc->source);
         return did_get_audio_info;
     }
     int channel_count = get_audio_channels(audio_info.speakers);
@@ -132,32 +138,34 @@ API_AVAILABLE(macos(13.0)) static bool init_audio_screen_stream(struct screen_ca
                                  sampleHandlerQueue:nil
                                               error:&error];
     if (!did_add_output) {
-        MACCAP_ERR("init_audio_screen_stream: Failed to add video stream output with error %s\n",
-                   [[error localizedFailureReason] cStringUsingEncoding:NSUTF8StringEncoding]);
-        [error release];
+        MACCAP_ERR("init_audio_screen_stream: Failed to add video stream output domain=%s code=%ld: %s",
+                   error.domain.UTF8String, (long) error.code, error.localizedDescription.UTF8String);
         [sc->disp release];
         sc->disp = NULL;
-        return !did_add_output;
+        obs_source_update_properties(sc->source);
+        return false;
     }
 
     did_add_output = [sc->disp addStreamOutput:sc->capture_delegate type:SCStreamOutputTypeAudio sampleHandlerQueue:nil
                                          error:&error];
     if (!did_add_output) {
-        MACCAP_ERR("init_audio_screen_stream: Failed to add audio stream output with error %s\n",
-                   [[error localizedFailureReason] cStringUsingEncoding:NSUTF8StringEncoding]);
-        [error release];
+        MACCAP_ERR("init_audio_screen_stream: Failed to add audio stream output domain=%s code=%ld: %s",
+                   error.domain.UTF8String, (long) error.code, error.localizedDescription.UTF8String);
         [sc->disp release];
         sc->disp = NULL;
-        return !did_add_output;
+        obs_source_update_properties(sc->source);
+        return false;
     }
     os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
 
     __block BOOL did_stream_start = false;
+    sc->capture_failed = false; // A delegate stop after start completion must not be overwritten when this function returns.
     [sc->disp startCaptureWithCompletionHandler:^(NSError *_Nullable error2) {
         did_stream_start = (BOOL) (error2 == nil);
         if (!did_stream_start) {
-            MACCAP_ERR("init_audio_screen_stream: Failed to start capture with error %s\n",
-                       [[error localizedFailureReason] cStringUsingEncoding:NSUTF8StringEncoding]);
+            sc->capture_failed = true;
+            MACCAP_ERR("init_audio_screen_stream: Failed to start capture domain=%s code=%ld: %s",
+                       error2.domain.UTF8String, (long) error2.code, error2.localizedDescription.UTF8String);
             // Clean up disp so it isn't stopped
             [sc->disp release];
             sc->disp = NULL;
@@ -166,6 +174,7 @@ API_AVAILABLE(macos(13.0)) static bool init_audio_screen_stream(struct screen_ca
     }];
     os_event_wait(sc->stream_start_completed);
 
+    obs_source_update_properties(sc->source);
     return did_stream_start;
 }
 
@@ -194,14 +203,9 @@ API_AVAILABLE(macos(13.0)) static void *sck_audio_capture_create(obs_data_t *set
     sc->application_id = [[NSString alloc] initWithUTF8String:obs_data_get_string(settings, "application")];
     pthread_mutex_init(&sc->mutex, NULL);
 
-    if (!init_audio_screen_stream(sc))
-        goto fail;
+    init_audio_screen_stream(sc); // Keep native restart available after a transient add-output or start failure.
 
     return sc;
-
-fail:
-    sck_audio_capture_destroy(sc);
-    return NULL;
 }
 
 #pragma mark - obs_properties
@@ -240,10 +244,11 @@ static bool reactivate_capture(obs_properties_t *props __unused, obs_property_t 
         return false;
     }
 
+    sc->display = CGMainDisplayID(); // The main display ID can change after disconnect/reconnect.
+    screen_capture_build_content_list(sc, sc->audio_capture_type == ScreenCaptureAudioDesktopStream);
     destroy_audio_screen_stream(sc);
-    sc->capture_failed = false;
     init_audio_screen_stream(sc);
-    obs_property_set_enabled(property, false);
+    obs_property_set_enabled(property, sc->capture_failed);
     return true;
 }
 

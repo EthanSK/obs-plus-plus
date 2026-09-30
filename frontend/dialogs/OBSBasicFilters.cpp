@@ -276,7 +276,8 @@ void OBSBasicFilters::UpdatePropertiesView(int row, bool async)
 
 void OBSBasicFilters::UpdateProperties(void *data, calldata_t *)
 {
-	QMetaObject::invokeMethod(static_cast<OBSBasicFilters *>(data)->view, &OBSPropertiesView::ReloadProperties);
+	QMetaObject::invokeMethod(static_cast<OBSBasicFilters *>(data)->view, &OBSPropertiesView::ReloadProperties,
+				 Qt::QueuedConnection); // Finish the current property handler before replacing its controls.
 }
 
 void OBSBasicFilters::AddFilter(OBSSource filter, bool focus)

@@ -289,7 +289,8 @@ void OBSBasicProperties::SourceRenamed(void *data, calldata_t *params)
 
 void OBSBasicProperties::UpdateProperties(void *data, calldata_t *)
 {
-	QMetaObject::invokeMethod(static_cast<OBSBasicProperties *>(data)->view, &OBSPropertiesView::ReloadProperties);
+	QMetaObject::invokeMethod(static_cast<OBSBasicProperties *>(data)->view, &OBSPropertiesView::ReloadProperties,
+				 Qt::QueuedConnection); // A source can request a reload while its current property-button handler still owns the controls.
 }
 
 void OBSBasicProperties::on_buttonBox_clicked(QAbstractButton *button)

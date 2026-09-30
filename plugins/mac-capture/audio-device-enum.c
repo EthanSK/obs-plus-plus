@@ -127,6 +127,7 @@ void coreaudio_enum_devices(struct device_list *list, bool input)
 
 bool coreaudio_get_device_id(CFStringRef uid, AudioDeviceID *id)
 {
+	*id = kAudioObjectUnknown; // A missing UID can return noErr with no device; never reuse a previous ID.
 	AudioObjectPropertyAddress propertyAddress = {kAudioHardwarePropertyDeviceForUID,
 						      kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
 
@@ -135,5 +136,5 @@ bool coreaudio_get_device_id(CFStringRef uid, AudioDeviceID *id)
 
 	OSStatus result =
 		AudioObjectGetPropertyData(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &size, &translation);
-	return result == noErr;
+	return result == noErr && *id != kAudioObjectUnknown;
 }

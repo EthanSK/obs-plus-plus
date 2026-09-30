@@ -32,3 +32,16 @@ for mode in sck legacy; do
         -o "$output_dir/test-$mode-surface-lifetime"
     "$output_dir/test-$mode-surface-lifetime"
 done
+
+xcrun clang -std=c11 "${common_flags[@]}" "$test_dir/test-coreaudio-recovery.c" \
+    -framework CoreAudio -framework AudioUnit -o "$output_dir/test-coreaudio-recovery"
+"$output_dir/test-coreaudio-recovery"
+
+for mode in video audio; do
+    extra_flags=(-UTEST_AUDIO_CAPTURE)
+    if [[ "$mode" == audio ]]; then extra_flags=(-DTEST_AUDIO_CAPTURE); fi
+    xcrun clang "${common_flags[@]}" "${extra_flags[@]}" "$test_dir/test-sck-content-lifetime.m" \
+        -framework Cocoa -framework IOSurface -framework ScreenCaptureKit \
+        -o "$output_dir/test-$mode-content-lifetime"
+    "$output_dir/test-$mode-content-lifetime"
+done

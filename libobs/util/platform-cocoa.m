@@ -26,6 +26,7 @@
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/sysctl.h>
+#include <sys/resource.h>
 
 #include <CoreServices/CoreServices.h>
 #include <mach/mach.h>
@@ -139,45 +140,19 @@ struct os_cpu_usage_info {
     int core_count;
 };
 
-static inline void add_time_value(time_value_t *dst, time_value_t *a, time_value_t *b)
-{
-    dst->microseconds = a->microseconds + b->microseconds;
-    dst->seconds = a->seconds + b->seconds;
-
-    if (dst->microseconds >= 1000000) {
-        dst->seconds += dst->microseconds / 1000000;
-        dst->microseconds %= 1000000;
-    }
-}
-
 static bool get_time_info(int64_t *cpu_time, int64_t *sys_time)
 {
-    mach_port_t task = mach_task_self();
-    struct task_thread_times_info thread_data;
-    struct task_basic_info_64 task_data;
-    mach_msg_type_number_t count;
-    kern_return_t kern_ret;
-    time_value_t cur_time;
+    struct rusage usage;
 
     *cpu_time = 0;
     *sys_time = 0;
 
-    count = TASK_THREAD_TIMES_INFO_COUNT;
-    kern_ret = task_info(task, TASK_THREAD_TIMES_INFO, (task_info_t) &thread_data, &count);
-    if (kern_ret != KERN_SUCCESS)
+    if (getrusage(RUSAGE_SELF, &usage) != 0)  // One task-wide sample avoids double-counting a thread that exits between live/dead queries.
         return false;
-
-    count = TASK_BASIC_INFO_64_COUNT;
-    kern_ret = task_info(task, TASK_BASIC_INFO_64, (task_info_t) &task_data, &count);
-    if (kern_ret != KERN_SUCCESS)
-        return false;
-
-    add_time_value(&cur_time, &thread_data.user_time, &thread_data.system_time);
-    add_time_value(&cur_time, &cur_time, &task_data.user_time);
-    add_time_value(&cur_time, &cur_time, &task_data.system_time);
 
     *cpu_time = os_gettime_ns() / 1000;
-    *sys_time = cur_time.seconds * 1000000 + cur_time.microseconds;
+    *sys_time = ((int64_t) usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000 +
+                usage.ru_utime.tv_usec + usage.ru_stime.tv_usec;
     return true;
 }
 

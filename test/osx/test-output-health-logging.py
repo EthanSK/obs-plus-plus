@@ -43,7 +43,9 @@ int obs_output_get_frames_dropped(OBSOutput output) { return output->dropped; }
 int obs_output_get_total_frames(OBSOutput output) { return output->frames; }
 float obs_output_get_congestion(OBSOutput output) { return output->congestion; }
 std::vector<OBSOutput> outputs;
+bool core_initialized = true;
 void obs_enum_outputs(bool (*callback)(void *, OBSOutput), void *data) {
+    assert(core_initialized);
     for (auto output : outputs) if (!callback(data, output)) break;
 }
 uint64_t now = 1000000000ULL;
@@ -56,9 +58,13 @@ bool os_get_proc_memory_usage(os_proc_memory_usage_t *usage) {
 }
 struct video_t {};
 video_t video;
-video_t *obs_get_video() { return &video; }
-unsigned video_output_get_skipped_frames(video_t *) { return 2; }
-unsigned video_output_get_total_frames(video_t *) { return 300; }
+bool video_available = true;
+struct obs_video_info {};
+bool obs_initialized() { return core_initialized; }
+bool obs_get_video_info(obs_video_info *) { return video_available; }
+video_t *obs_get_video() { assert(video_available); return &video; }
+unsigned video_output_get_skipped_frames(video_t *value) { assert(value); return 2; }
+unsigned video_output_get_total_frames(video_t *value) { assert(value); return 300; }
 unsigned obs_get_lagged_frames() { return 3; }
 unsigned obs_get_total_frames() { return 301; }
 double obs_get_active_fps() { return 30; }
@@ -115,6 +121,13 @@ int main() {
     logs.clear(); record.active = true; memory_available = false; now += 30000000000ULL; bar.LogOutputHealth();
     assert(logs.size() == 1 && logs[0].find("memory_available=0") != std::string::npos);
     puts("PASS: memory-query failure is explicitly marked unavailable");
+    logs.clear(); video_available = false; now += 30000000000ULL; bar.LogOutputHealth();
+    assert(logs.size() == 1 && logs[0].find("main_encode_lag=0/0") != std::string::npos);
+    assert(logs[0].find("main_video_available=0") != std::string::npos);
+    puts("PASS: startup video failure retains health diagnostics without dereferencing a missing video");
+    logs.clear(); core_initialized = false; now += 30000000000ULL; bar.LogOutputHealth();
+    assert(logs.empty());
+    puts("PASS: the CPU timer cannot enumerate outputs before core startup");
 }
 '''
 

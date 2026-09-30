@@ -74,6 +74,7 @@ void screen_capture_build_content_list(struct screen_capture *sc, bool display_c
 
     os_sem_wait(sc->shareable_content_available);
     [sc->shareable_content release];
+    sc->shareable_content = nil; // A failed refresh must not leave a pointer to the released inventory.
     BOOL onScreenWindowsOnly = (display_capture) ? NO : !sc->show_hidden_windows;
     [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:onScreenWindowsOnly
                                                  completionHandler:new_content_received];

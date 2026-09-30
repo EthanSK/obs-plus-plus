@@ -45,6 +45,7 @@ API_AVAILABLE(macos(12.5)) static void destroy_screen_stream(struct screen_captu
     }
 
     os_event_destroy(sc->stream_start_completed);
+    sc->stream_start_completed = NULL;
 }
 
 API_AVAILABLE(macos(12.5)) static void sck_video_capture_destroy(void *data)
@@ -60,7 +61,7 @@ API_AVAILABLE(macos(12.5)) static void sck_video_capture_destroy(void *data)
 
     obs_leave_graphics();
 
-    if (sc->shareable_content) {
+    if (sc->shareable_content_available) { // The async inventory request can still be pending even when its content is nil.
         os_sem_wait(sc->shareable_content_available);
         [sc->shareable_content release];
         os_sem_destroy(sc->shareable_content_available);
@@ -79,10 +80,7 @@ API_AVAILABLE(macos(12.5)) static void sck_video_capture_destroy(void *data)
 API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture *sc)
 {
     SCContentFilter *content_filter;
-    if (sc->capture_failed) {
-        sc->capture_failed = false;
-        obs_source_update_properties(sc->source);
-    }
+    sc->capture_failed = true; // Keep restart available if adding outputs or starting the replacement stream fails.
 
     sc->frame = CGRectZero;
     sc->stream_properties = [[SCStreamConfiguration alloc] init];
@@ -247,10 +245,11 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
                                  sampleHandlerQueue:nil
                                               error:&addStreamOutputError];
     if (!did_add_output) {
-        MACCAP_ERR("init_screen_stream: Failed to add stream output with error %s\n",
-                   [[addStreamOutputError localizedFailureReason] cStringUsingEncoding:NSUTF8StringEncoding]);
-        [addStreamOutputError release];
-        return !did_add_output;
+        MACCAP_ERR("init_screen_stream: Failed to add stream output domain=%s code=%ld: %s",
+                   addStreamOutputError.domain.UTF8String, (long) addStreamOutputError.code,
+                   addStreamOutputError.localizedDescription.UTF8String);
+        obs_source_update_properties(sc->source);
+        return false;
     }
 
     if (@available(macOS 13.0, *)) {
@@ -258,20 +257,23 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
                                 sampleHandlerQueue:nil
                                              error:&addStreamOutputError];
         if (!did_add_output) {
-            MACCAP_ERR("init_screen_stream: Failed to add audio stream output with error %s\n",
-                       [[addStreamOutputError localizedFailureReason] cStringUsingEncoding:NSUTF8StringEncoding]);
-            [addStreamOutputError release];
-            return !did_add_output;
+            MACCAP_ERR("init_screen_stream: Failed to add audio stream output domain=%s code=%ld: %s",
+                       addStreamOutputError.domain.UTF8String, (long) addStreamOutputError.code,
+                       addStreamOutputError.localizedDescription.UTF8String);
+            obs_source_update_properties(sc->source);
+            return false;
         }
     }
     os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
 
     __block BOOL did_stream_start = NO;
+    sc->capture_failed = false; // Preserve a delegate failure reported between start completion and the waiter returning.
     [sc->disp startCaptureWithCompletionHandler:^(NSError *_Nullable error) {
         did_stream_start = (BOOL) (error == nil);
         if (!did_stream_start) {
-            MACCAP_ERR("init_screen_stream: Failed to start capture with error %s\n",
-                       [[error localizedFailureReason] cStringUsingEncoding:NSUTF8StringEncoding]);
+            sc->capture_failed = true;
+            MACCAP_ERR("init_screen_stream: Failed to start capture domain=%s code=%ld: %s",
+                       error.domain.UTF8String, (long) error.code, error.localizedDescription.UTF8String);
             // Clean up disp so it isn't stopped
             [sc->disp release];
             sc->disp = NULL;
@@ -280,6 +282,7 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
     }];
     os_event_wait(sc->stream_start_completed);
 
+    obs_source_update_properties(sc->source);
     return did_stream_start;
 }
 
@@ -318,8 +321,7 @@ API_AVAILABLE(macos(12.5)) static void *sck_video_capture_create(obs_data_t *set
     sc->application_id = [[NSString alloc] initWithUTF8String:obs_data_get_string(settings, "application")];
     pthread_mutex_init(&sc->mutex, NULL);
 
-    if (!init_screen_stream(sc))
-        goto fail;
+    init_screen_stream(sc); // Retain the failed source so a transient startup error can be retried from its properties.
 
     return sc;
 

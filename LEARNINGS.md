@@ -1,5 +1,80 @@
 # Verified project lessons
 
+## ScreenCaptureKit recovery must preserve ownership and failure state
+
+A failed asynchronous inventory refresh must clear the pointer immediately
+after releasing the previous `SCShareableContent`. The callback posts the
+inventory semaphore on success and failure; destruction must wait on that
+semaphore even when the inventory pointer is nil, otherwise the pending callback
+can write into freed source state. Clear destroyed start-event handles before
+another initialization attempt so an early failure cannot destroy them twice.
+
+Keep capture marked failed while configuring outputs, clear it immediately
+before requesting start, and set it on start failure. Do not clear it again after
+the completion wait: a delegate stop can arrive between completion and return.
+`NSError` out-parameters are not caller-owned; do not release them on
+failure. Audio-only capture needs the same fresh inventory and current main
+display identity on retry. A missing display must leave a retryable source, not
+construct a filter with nil. Native property callbacks return whether the UI
+should refresh, not whether capture resumed; the toolbar must check the updated
+failure state rather than call every returned `true` a success.
+
+Retain that context on an initial add-output/start failure too: OBS rejects
+properties and updates when the source's context is null. Failed streams can be
+cleaned up on the next retry or destruction. Failure logs must use the actual
+completion error, with domain/code and `localizedDescription`; optional
+`localizedFailureReason` is often nil and hid the reason in controlled tests.
+
+The isolated `test-sck-content-lifetime.m` harness exercises the actual video and
+audio implementations with controlled async inventories and real semaphores.
+It reproduces failed-refresh ownership and pending-callback teardown without
+capturing a display, plus initial add-output/start failure and a subsequent
+successful retry and an immediate delegate stop using isolated stream substitutes. This is not proof that
+every physical hotplug succeeds.
+
+Queue Properties and Filters reloads even when the source emits its update on
+the UI thread. A direct reload can free the clicked property's controls before
+its handler finishes. The Qt harness tests both actual update callbacks and a
+closed receiver. Aitum's source enumeration must only retain matching sources;
+run inventory queries/restarts afterward, because enumeration holds the source
+list mutex also needed by rendering. Retained sources use OBS's existing RAII
+ownership, and the isolated Aitum harness checks work happens outside that lock.
+
+## Missing CoreAudio devices are not successful device lookups
+
+CoreAudio's UID lookup returns `noErr` plus `kAudioObjectUnknown` for an absent
+UID, as verified with the native HAL. Clear the output ID first and require both
+success and a known ID; do not repeatedly query name properties on object zero.
+Do not silently substitute a different microphone for a missing saved device.
+Balance the copied CFString even when UTF-8 conversion fails, and set `active`
+after a successful AudioUnit start so normal teardown actually stops that unit.
+The native/stubbed regression harness tests absent UID/default input, repeated
+retries, successful reconnection, name ownership, and start/stop state.
+
+Reconnect-worker running state is not pthread ownership. Keep a separate joinable
+flag, reap the completed worker before replacing its handle, and join at shutdown
+even after reconnect succeeds. Publish running state before thread creation and
+clear it if creation fails. The harness verifies ten finished-worker cycles with
+real pthread creation/join and a controlled worker, without accessing hardware.
+
+## CPU accounting must use one cumulative whole-task query
+
+Separate Mach reads of live-thread and terminated-thread CPU totals can count
+an exiting thread twice in one sample and then return a negative next delta.
+A negative diagnostic sample was observed in a long OBS session; the exact
+historical interleaving was not captured. Use one `getrusage(RUSAGE_SELF)` query
+of cumulative task CPU time instead, preserving OBS's existing core normalization
+and measurement interval. The deterministic `test-cpu-usage.py` harness reproduces
+the old accounting transition and checks query-failure baseline handling. This
+changes reporting, not encoder scheduling or an actual stream's CPU allocation.
+
+Apple's current XNU `calcru` obtains CPU time from `recount_task_times`, whose
+counters accumulate task lifetime usage rather than separately summing live and
+terminated threads. See Apple's `bsd/kern/kern_resource.c`, `osfmk/kern/recount.c`
+and `doc/observability/recount.md`. The isolated test verifies OBS's sampling
+arithmetic, not kernel-wide atomicity; do not claim all platforms or historical
+XNU versions provide the same implementation.
+
 ## Keep the Metal drawable pool around the full preview frame
 
 OBS upstream merged PR #13664 into its 33.0 development line on 17 September
@@ -128,6 +203,12 @@ baseline, so a second immediate query produces a misleading diagnostic value.
 Never log stream settings, URLs, keys, tokens or frame contents for this feature.
 Existing OBS log retention remains authoritative; no extra telemetry files or
 background process are needed.
+
+The CPU timer can run during startup error dialogs before graphics/video setup
+succeeds. Do not enumerate outputs before `obs_initialized()`, or call
+`obs_get_video()` before `obs_get_video_info()` confirms the main mix exists.
+Mark absent video counters explicitly with `main_video_available=0`; zero
+counters in that state are unavailable data, not successful encoding.
 
 VideoToolbox callback failures and ScreenCaptureKit texture failures log the
 first event and at most one further report per 30 seconds per instance, retaining
