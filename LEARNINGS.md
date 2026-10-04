@@ -142,6 +142,16 @@ cannot supply high-resolution formats that the USB 2.0 endpoint does not
 advertise. Preserve the existing source and only rebind its device and format
 after verifying the intended endpoint has returned.
 
+The card's internal RGB/HID hub can also appear as `USB 2.0 Hub@00100000`
+(Terminus `1a40:0101`) while video is working over a separate SuperSpeed
+endpoint. Do not identify that hub as Ethan's external dock or HDMI splitter
+from its name alone; inspect the video device's actual `UsbLinkSpeed` and
+compare the full topology. Both modern and legacy video-capture sources read
+`AVCaptureDevice.formats`; if independent AVFoundation discovery also lacks
+the high-resolution modes, switching OBS source implementations cannot add
+them. A degraded USB link establishes the negotiated state, not which cable,
+connector, firmware or host-controller condition caused it.
+
 ## Keep the Metal drawable pool around the full preview frame
 
 OBS upstream merged PR #13664 into its 33.0 development line on 17 September
