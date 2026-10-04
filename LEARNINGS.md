@@ -115,6 +115,22 @@ and `doc/observability/recount.md`. The isolated test verifies OBS's sampling
 arithmetic, not kernel-wide atomicity; do not claim all platforms or historical
 XNU versions provide the same implementation.
 
+## Check capture-card USB speed before changing the renderer or source
+
+The Live Gamer Ultra 2.1 can reconnect as a USB 2.0 device: IORegistry reports
+`UsbLinkSpeed = 480000000`, OBS sees `Live Gamer Ultra 2.1-Video` with an
+`0x110...` device ID, and its available capture format is limited to 1280x720
+at about 30 FPS. This combination recurred while OpenGL was selected; it is
+not evidence of a Metal rendering failure.
+
+The earlier physical recovery reseated only the Mac-to-card USB-C data cable,
+restoring a 5 Gbps link, an `0x200...` identity and 3440x1440 at 60 FPS NV12.
+Recheck the live USB speed and advertised formats after reconnection before
+reselecting the existing OBS source's device. Do not recreate the source,
+save the degraded format as a fix, disturb HDMI or reset unrelated USB devices
+and mounted recording drives. The cable/port problem still needs physical
+verification; a restart or a different renderer cannot establish that recovery.
+
 ## Keep the Metal drawable pool around the full preview frame
 
 OBS upstream merged PR #13664 into its 33.0 development line on 17 September
