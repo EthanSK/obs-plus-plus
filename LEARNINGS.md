@@ -131,6 +131,17 @@ save the degraded format as a fix, disturb HDMI or reset unrelated USB devices
 and mounted recording drives. The cable/port problem still needs physical
 verification; a restart or a different renderer cannot establish that recovery.
 
+The empty first Device entry in the modern macOS video-capture source is the
+deliberate no-device option (`device = ""`), not an unnamed capture card.
+`properties_update_device` adds that option before named AVFoundation devices;
+a missing saved nonempty ID is a separate disabled entry. Check the actual
+source setting and macOS device inventory before treating a blank selection
+as a stale camera registry. Cached `device_name` can remain populated even
+when no device is selected. Reopening Properties refreshes discovery, but
+cannot supply high-resolution formats that the USB 2.0 endpoint does not
+advertise. Preserve the existing source and only rebind its device and format
+after verifying the intended endpoint has returned.
+
 ## Keep the Metal drawable pool around the full preview frame
 
 OBS upstream merged PR #13664 into its 33.0 development line on 17 September
