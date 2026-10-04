@@ -163,6 +163,26 @@ before this interruption, preserve source settings, and verify both USB speed
 and formats afterward; do not equate a logical reset with removing device power
 or repairing the physical SuperSpeed connection.
 
+The successful 4 October 2026 recovery required physical USB-C reconnection
+first, then an OBS source rebind. IORegistry returned to 5 Gbps and independent
+AVFoundation discovery again advertised 3440x1440 at 60 FPS and 4K modes, while
+the existing source still held the old device ID and degraded 720p format.
+Resolve the current video endpoint's actual unique ID instead of hardcoding
+the historical `0x110...` or `0x200...` prefixes. Update only that existing
+source's device and format; keep its transforms, filters and scene references.
+
+For `macos-avcapture-fast`, select the enabled `supported_format` value returned
+by OBS's live properties list after rebinding the device, plus that native
+format's actual frame-rate rational. Do not invent the encoded format string,
+leave a previously degraded format selected, or change the canvas frame rate
+to match the capture input. This recovery used 3440x1440 NV12 at approximately
+60 FPS while preserving the 3440x1440 canvas at 30 FPS. Allow the first frame to
+arrive before checking: an immediate source screenshot returned render error
+702, but later source and program-scene screenshots verified the desktop
+picture and existing webcam overlay. Active/showing flags and a configured
+capture log alone are not proof of captured frames. This fixes the recovered
+session, not the underlying reason the USB link negotiated down to 480 Mbps.
+
 ## Keep the Metal drawable pool around the full preview frame
 
 OBS upstream merged PR #13664 into its 33.0 development line on 17 September
