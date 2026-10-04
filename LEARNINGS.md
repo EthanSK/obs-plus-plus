@@ -51,15 +51,9 @@ after a successful AudioUnit start so normal teardown actually stops that unit.
 The native/stubbed regression harness tests absent UID/default input, repeated
 retries, successful reconnection, name ownership, and start/stop state.
 
-Reconnect-worker running state is not pthread ownership. Keep a separate joinable
-flag, reap the completed worker before replacing its handle, and join at shutdown
-even after reconnect succeeds. Publish running state before thread creation and
-clear it if creation fails. The harness verifies ten finished-worker cycles with
-real pthread creation/join and a controlled worker, without accessing hardware.
-
-CoreAudio creation and update initialize the device synchronously on their caller;
-scene-collection loading calls creation on the UI thread. A live process sample
-can therefore show the entire interface waiting in `AudioOutputUnitStart` and
+The original CoreAudio creation and update initialized the device synchronously
+on their caller; scene-collection loading calls creation on the UI thread. A live
+process sample showed the entire interface waiting in `AudioOutputUnitStart` and
 CoreAudio's `StartAndWaitForState` while Metal rendering continues normally.
 Confirm that boundary with a process sample and the gap before the device's
 initialized log; stable memory and continuing rendering do not establish a
@@ -67,6 +61,41 @@ responsive interface. The health timer also runs on the UI thread, so its silenc
 during this wait does not mean the process exited. Diagnose the audio-service
 delay separately from the inherited OBS blocking-start behavior; neither a
 nearby Bluetooth event nor the selected renderer establishes its cause.
+
+Keep all AudioUnit setup/start/stop/retries on one persistent joinable worker per
+source. Create/update submit independent copied settings and the caller's speaker
+layout; materialize `device_id` and `enable_downmix` because `obs_data_apply`
+copies only user values, not registered defaults. Keep configured IDs separate
+from resolved default IDs so channel-map settings and monitoring dedup stay
+consistent. Coalesce newer queued settings, signal the event inside the state
+lock, and never hold that lock over Apple calls or waits.
+
+Destroy closes a source gate and requests stop without joining a blocked worker.
+Audio callbacks use the gated raw source pointer, not source references that can
+trigger destruction on the realtime thread. Retain the worker context until
+AudioUnit teardown completes; property listener blocks use a private serial
+queue that teardown drains after removal. Only publish ready channel metadata
+when no newer update/restart is pending, and refresh Properties on a queued UI
+task whose pending count prevents its context from being freed early. That UI
+task must acquire a checked weak-source reference: last-reference release can
+precede deferred source destruction, so the gate alone cannot prove the source
+is still alive. Never acquire or release source references on the audio thread.
+
+Reap only finished workers during normal source changes. Final `free_type_data`
+shutdown must close gates and stop live workers too: libobs destroys leftover
+sources only after that hook, so simply joining live retry workers deadlocks.
+Join before core audio and module locale teardown, retaining a closed context
+for queued UI work or a leftover source's later destroy. This final barrier still
+cannot safely cancel an indefinitely blocked Apple call. Properties device
+enumeration and ScreenCaptureKit audio initialization remain separate synchronous
+paths; the microphone worker does not fix those or diagnose the macOS HAL delay.
+
+The CoreAudio harness runs actual worker code with controlled AudioUnit stubs:
+blocked create/update/destroy, late audio suppression, queued-notification drain,
+rapid channel-map Properties changes, defaults, configured output IDs, automatic
+retry, live-context shutdown, expired-source UI refreshes, 25 blocked-source
+removals and 100 create/destroy cycles. AddressSanitizer and ThreadSanitizer coverage is isolated from the live
+app; it does not establish physical-device recovery or installed-runtime safety.
 
 ## CPU accounting must use one cumulative whole-task query
 

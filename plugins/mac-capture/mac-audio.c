@@ -3,10 +3,13 @@
 #include <CoreAudio/CoreAudio.h>
 #include <unistd.h>
 #include <errno.h>
+#include <dispatch/dispatch.h>
+#include <Block.h>
 
 #include <obs-module.h>
 #include <mach/mach_time.h>
 #include <util/threading.h>
+#include <util/platform.h>
 #include <util/c99defs.h>
 #include <util/apple/cfstring-utils.h>
 
@@ -51,14 +54,93 @@ struct coreaudio_data {
 	enum speaker_layout speakers;
 	bool enable_downmix;
 
-	pthread_t reconnect_thread;
-	bool reconnect_thread_joinable;
-	os_event_t *exit_event;
-	volatile bool reconnecting;
-	unsigned long retry_time;
+	pthread_mutex_t mutex;
+	pthread_mutex_t source_gate;
+	os_event_t *request_event;
+	obs_data_t *pending_settings;
+	char *configured_device_uid;
+	enum speaker_layout pending_speakers;
+	bool stopping;
+	bool source_closed;
+	bool source_destroyed;
+	unsigned int pending_property_updates;
+	bool restart_requested;
+	unsigned long restart_delay;
+	bool properties_ready;
+	obs_weak_source_t *weak_source;
+	obs_source_t *
+		source; // source_gate closes before libobs frees this pointer, including forced shutdown of leftover sources.
+	dispatch_queue_t notification_queue;
+	AudioObjectPropertyListenerBlock notification_block;
 
-	obs_source_t *source;
+	pthread_t worker;
+	bool worker_finished;
+	bool worker_joined;
+	struct coreaudio_data *next_worker;
 };
+
+static pthread_mutex_t workers_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t reaping_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct coreaudio_data *workers;
+
+static void coreaudio_reap_workers(bool shutdown)
+{
+	pthread_mutex_lock(
+		&reaping_mutex); // Reapers release the registry lock while joining; serialize them so two callers cannot join or free the same worker.
+	pthread_mutex_lock(&workers_mutex);
+	struct coreaudio_data **entry = &workers;
+	while (*entry) {
+		struct coreaudio_data *ca = *entry;
+		if (!shutdown && !ca->worker_finished) {
+			entry = &ca->next_worker;
+			continue;
+		}
+		if (shutdown && !ca->worker_joined) {
+			pthread_mutex_lock(&ca->source_gate);
+			ca->source_closed = true;
+			pthread_mutex_unlock(&ca->source_gate);
+			pthread_mutex_lock(&ca->mutex);
+			ca->stopping = true;
+			ca->properties_ready = false;
+			os_event_signal(
+				ca->request_event); // Stop live retry workers too: libobs can destroy leaked source references only after its type-data shutdown hook.
+			pthread_mutex_unlock(&ca->mutex);
+		}
+		*entry = ca->next_worker;
+		pthread_mutex_unlock(&workers_mutex);
+		if (!ca->worker_joined)
+			pthread_join(
+				ca->worker,
+				NULL); // Only final core shutdown waits for an in-flight Apple call; completed workers are otherwise reaped without delaying source changes.
+		ca->worker_joined = true;
+		pthread_mutex_lock(&ca->mutex);
+		bool free_context = ca->source_destroyed && !ca->pending_property_updates;
+		pthread_mutex_unlock(&ca->mutex);
+		pthread_mutex_lock(&workers_mutex);
+		if (free_context) {
+			obs_weak_source_release(ca->weak_source);
+			Block_release(ca->notification_block);
+			dispatch_release(ca->notification_queue);
+			os_event_destroy(ca->request_event);
+			pthread_mutex_destroy(&ca->source_gate);
+			pthread_mutex_destroy(&ca->mutex);
+			bfree(ca);
+		} else {
+			ca->next_worker = *entry;
+			*entry = ca;
+			entry = &ca->next_worker; // A queued UI refresh or a source destroyed later by libobs still needs the closed gate and event.
+		}
+	}
+	pthread_mutex_unlock(&workers_mutex);
+	pthread_mutex_unlock(&reaping_mutex);
+}
+
+static void coreaudio_free_type_data(void *unused)
+{
+	UNUSED_PARAMETER(unused);
+	coreaudio_reap_workers(
+		true); // libobs calls this before unloading the module or freeing core audio, so pending workers cannot return into freed code/state.
+}
 
 static bool get_default_output_device(struct coreaudio_data *ca)
 {
@@ -70,8 +152,10 @@ static bool get_default_output_device(struct coreaudio_data *ca)
 	if (!list.items.num)
 		return false;
 
+	pthread_mutex_lock(&ca->mutex);
 	bfree(ca->device_uid);
 	ca->device_uid = bstrdup(list.items.array[0].value.array);
+	pthread_mutex_unlock(&ca->mutex);
 
 	device_list_free(&list);
 	return true;
@@ -269,12 +353,10 @@ static bool coreaudio_init_format(struct coreaudio_data *ca)
 	AudioStreamBasicDescription inputDescription;
 	OSStatus stat;
 	UInt32 size;
-	struct obs_audio_info aoi;
-	if (!obs_get_audio_info(&aoi)) {
+	if (ca->speakers == SPEAKERS_UNKNOWN) {
 		blog(LOG_WARNING, "No active audio");
 		return false;
 	}
-	ca->speakers = aoi.speakers;
 	uint32_t channels = get_audio_channels(ca->speakers);
 
 	size = sizeof(inputDescription);
@@ -288,12 +370,16 @@ static bool coreaudio_init_format(struct coreaudio_data *ca)
 	if (!ca_success(stat, ca, "coreaudio_init_format", "get input format"))
 		return false;
 
+	pthread_mutex_lock(&ca->mutex);
 	ca->available_channels = inputDescription.mChannelsPerFrame;
-	if (ca->available_channels > MAX_DEVICE_INPUT_CHANNELS) {
+	if (ca->available_channels > MAX_DEVICE_INPUT_CHANNELS)
 		ca->available_channels = MAX_DEVICE_INPUT_CHANNELS;
-	}
+	pthread_mutex_unlock(&ca->mutex);
 
-	ca->channel_names = coreaudio_get_channel_names(ca);
+	char **channel_names = coreaudio_get_channel_names(ca);
+	pthread_mutex_lock(&ca->mutex);
+	ca->channel_names = channel_names;
+	pthread_mutex_unlock(&ca->mutex);
 
 	if (ca->enable_downmix) {
 		blog(LOG_INFO, "Downmix enabled: %d to %d channels.", ca->available_channels, channels);
@@ -426,8 +512,9 @@ static OSStatus input_callback(void *data, AudioUnitRenderActionFlags *action_fl
 	struct obs_source_audio audio;
 
 	stat = AudioUnitRender(ca->unit, action_flags, ts_data, bus_num, frames, ca->buf_list);
-	if (!ca_success(stat, ca, "input_callback", "audio retrieval"))
+	if (!ca_success(stat, ca, "input_callback", "audio retrieval")) {
 		return noErr;
+	}
 
 	for (UInt32 i = 0; i < ca->buf_list->mNumberBuffers; i++) {
 		if (i < MAX_AUDIO_CHANNELS) {
@@ -442,7 +529,12 @@ static OSStatus input_callback(void *data, AudioUnitRenderActionFlags *action_fl
 	audio.samples_per_sec = ca->sample_rate;
 	audio.timestamp = AudioConvertHostTimeToNanos(ts_data->mHostTime);
 
-	obs_source_output_audio(ca->source, &audio);
+	pthread_mutex_lock(&ca->source_gate);
+	if (!ca->source_closed)
+		obs_source_output_audio(
+			ca->source,
+			&audio); // The destroy callback closes this gate before freeing the source; do not take/release source references on the realtime audio thread.
+	pthread_mutex_unlock(&ca->source_gate);
 
 	UNUSED_PARAMETER(ignored_buffers);
 	return noErr;
@@ -452,63 +544,20 @@ static void coreaudio_stop(struct coreaudio_data *ca);
 static bool coreaudio_init(struct coreaudio_data *ca);
 static void coreaudio_uninit(struct coreaudio_data *ca);
 
-static void *reconnect_thread(void *param)
-{
-	struct coreaudio_data *ca = param;
-
-	while (os_event_timedwait(ca->exit_event, ca->retry_time) == ETIMEDOUT) {
-		if (coreaudio_init(ca))
-			break;
-	}
-
-	blog(LOG_DEBUG, "coreaudio: exit the reconnect thread");
-	ca->reconnecting = false;
-	return NULL;
-}
-
-static void coreaudio_begin_reconnect(struct coreaudio_data *ca)
-{
-	int ret;
-
-	if (ca->reconnecting)
-		return;
-
-	if (ca->reconnect_thread_joinable) { // A completed worker still owns pthread resources until joined.
-		pthread_join(ca->reconnect_thread, NULL);
-		ca->reconnect_thread_joinable = false;
-	}
-	ca->reconnecting = true; // Publish running state before creation so another notification cannot replace the new handle.
-	ret = pthread_create(&ca->reconnect_thread, NULL, reconnect_thread, ca);
-	if (ret != 0) {
-		ca->reconnecting = false;
-		blog(LOG_WARNING,
-		     "[coreaudio_begin_reconnect] failed to "
-		     "create thread, error code: %d",
-		     ret);
-	} else {
-		ca->reconnect_thread_joinable = true;
-	}
-}
-
 static OSStatus notification_callback(AudioObjectID id, UInt32 num_addresses,
 				      const AudioObjectPropertyAddress addresses[], void *data)
 {
 	struct coreaudio_data *ca = data;
 
-	coreaudio_stop(ca);
-	coreaudio_uninit(ca);
-
-	if (addresses[0].mSelector == PROPERTY_DEFAULT_DEVICE)
-		ca->retry_time = 300;
-	else
-		ca->retry_time = 2000;
-
-	blog(LOG_INFO,
-	     "coreaudio: device '%s' disconnected or changed.  "
-	     "attempting to reconnect",
-	     ca->device_name);
-
-	coreaudio_begin_reconnect(ca);
+	pthread_mutex_lock(&ca->mutex);
+	if (!ca->stopping) {
+		ca->restart_requested = true;
+		ca->restart_delay = num_addresses && addresses[0].mSelector == PROPERTY_DEFAULT_DEVICE ? 300 : 2000;
+		ca->properties_ready = false;
+		os_event_signal(
+			ca->request_event); // The AudioUnit owner handles teardown after an in-flight start returns; notifications must not dispose it concurrently.
+	}
+	pthread_mutex_unlock(&ca->mutex);
 
 	UNUSED_PARAMETER(id);
 	UNUSED_PARAMETER(num_addresses);
@@ -520,7 +569,8 @@ static OSStatus add_listener(struct coreaudio_data *ca, UInt32 property)
 {
 	AudioObjectPropertyAddress addr = {property, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
 
-	return AudioObjectAddPropertyListener(ca->device_id, &addr, notification_callback, ca);
+	return AudioObjectAddPropertyListenerBlock(ca->device_id, &addr, ca->notification_queue,
+						   ca->notification_block);
 }
 
 static bool coreaudio_init_hooks(struct coreaudio_data *ca)
@@ -540,7 +590,8 @@ static bool coreaudio_init_hooks(struct coreaudio_data *ca)
 		AudioObjectPropertyAddress addr = {PROPERTY_DEFAULT_DEVICE, kAudioObjectPropertyScopeGlobal,
 						   kAudioObjectPropertyElementMain};
 
-		stat = AudioObjectAddPropertyListener(kAudioObjectSystemObject, &addr, notification_callback, ca);
+		stat = AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &addr, ca->notification_queue,
+							   ca->notification_block);
 		if (!ca_success(stat, ca, "coreaudio_init_hooks", "set device change callback"))
 			return false;
 	}
@@ -560,15 +611,19 @@ static void coreaudio_remove_hooks(struct coreaudio_data *ca)
 	AudioObjectPropertyAddress addr = {kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal,
 					   kAudioObjectPropertyElementMain};
 
-	AudioObjectRemovePropertyListener(ca->device_id, &addr, notification_callback, ca);
+	AudioObjectRemovePropertyListenerBlock(ca->device_id, &addr, ca->notification_queue, ca->notification_block);
 
 	addr.mSelector = PROPERTY_FORMATS;
-	AudioObjectRemovePropertyListener(ca->device_id, &addr, notification_callback, ca);
+	AudioObjectRemovePropertyListenerBlock(ca->device_id, &addr, ca->notification_queue, ca->notification_block);
 
 	if (ca->default_device) {
 		addr.mSelector = PROPERTY_DEFAULT_DEVICE;
-		AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &addr, notification_callback, ca);
+		AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &addr, ca->notification_queue,
+						       ca->notification_block);
 	}
+	dispatch_sync(
+		ca->notification_queue, ^{
+		}); // Removed listeners can have queued notifications; drain this private queue before releasing their context.
 
 	set_property(ca->unit, kAudioOutputUnitProperty_SetInputCallback, SCOPE_GLOBAL, 0, &callback_info,
 		     sizeof(callback_info));
@@ -614,8 +669,15 @@ static bool coreaudio_start(struct coreaudio_data *ca)
 	if (ca->active)
 		return true;
 
+	uint64_t started = os_gettime_ns();
+	blog(LOG_INFO, "coreaudio: starting device '%s' (uid: %s) on audio worker", ca->device_name, ca->device_uid);
 	stat = AudioOutputUnitStart(ca->unit);
-	ca->active = ca_success(stat, ca, "coreaudio_start", "start audio"); // Disconnect cleanup must stop a started AudioUnit.
+	uint64_t elapsed_ms = (os_gettime_ns() - started) / 1000000;
+	if (elapsed_ms >= 1000)
+		blog(LOG_WARNING, "coreaudio: device '%s' audio start took %" PRIu64 " ms (status: %d)",
+		     ca->device_name, elapsed_ms, (int)stat);
+	ca->active = ca_success(stat, ca, "coreaudio_start",
+				"start audio"); // Disconnect cleanup must stop a started AudioUnit.
 	return ca->active;
 }
 
@@ -700,25 +762,11 @@ fail:
 	return false;
 }
 
-static void coreaudio_try_init(struct coreaudio_data *ca)
-{
-	if (!coreaudio_init(ca)) {
-		blog(LOG_INFO,
-		     "coreaudio: failed to find device "
-		     "uid: %s, waiting for connection",
-		     ca->device_uid);
-
-		ca->retry_time = 2000;
-
-		if (ca->no_devices)
-			blog(LOG_INFO, "coreaudio: no device found");
-		else
-			coreaudio_begin_reconnect(ca);
-	}
-}
-
 static void coreaudio_uninit(struct coreaudio_data *ca)
 {
+	pthread_mutex_lock(&ca->mutex);
+	ca->properties_ready = false;
+	pthread_mutex_unlock(&ca->mutex);
 	if (!ca->au_initialized)
 		return;
 
@@ -741,6 +789,8 @@ static void coreaudio_uninit(struct coreaudio_data *ca)
 	buf_list_free(ca->buf_list);
 	ca->buf_list = NULL;
 
+	pthread_mutex_lock(&ca->mutex);
+	ca->properties_ready = false;
 	if (ca->channel_names) {
 		for (uint32_t i = 0; i < ca->available_channels; i++) {
 			bfree(ca->channel_names[i]);
@@ -748,6 +798,7 @@ static void coreaudio_uninit(struct coreaudio_data *ca)
 		bfree(ca->channel_names);
 		ca->channel_names = NULL;
 	}
+	pthread_mutex_unlock(&ca->mutex);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -764,47 +815,31 @@ static const char *coreaudio_output_getname(void *unused)
 	return TEXT_AUDIO_OUTPUT;
 }
 
-static void coreaudio_shutdown(struct coreaudio_data *ca)
-{
-	if (ca->reconnect_thread_joinable) { // Join finished workers too before replacing settings or freeing their context.
-		os_event_signal(ca->exit_event);
-		pthread_join(ca->reconnect_thread, NULL);
-		ca->reconnect_thread_joinable = false;
-		ca->reconnecting = false;
-		os_event_reset(ca->exit_event);
-	}
-
-	coreaudio_uninit(ca);
-
-	if (ca->unit)
-		AudioComponentInstanceDispose(ca->unit);
-}
-
 static void coreaudio_destroy(void *data)
 {
 	struct coreaudio_data *ca = data;
 
 	if (ca) {
-		coreaudio_shutdown(ca);
+		pthread_mutex_lock(&ca->source_gate);
+		ca->source_closed = true;
+		pthread_mutex_unlock(&ca->source_gate);
 		/* If the device is also used for monitoring, a cleanup is needed. */
 		if (!ca->input)
 			obs_source_audio_output_capture_device_changed(ca->source, NULL);
-
-		os_event_destroy(ca->exit_event);
-
-		if (ca->channel_map) {
-			bfree(ca->channel_map);
-			ca->channel_map = NULL;
-		}
-
-		bfree(ca->device_name);
-		bfree(ca->device_uid);
-		bfree(ca);
+		pthread_mutex_lock(&ca->mutex);
+		ca->stopping = true;
+		ca->source_destroyed = true;
+		ca->properties_ready = false;
+		os_event_signal(ca->request_event);
+		pthread_mutex_unlock(
+			&ca->mutex); // The worker retains its own state until Apple finishes; source destruction must not join it and freeze the collection switch.
+		coreaudio_reap_workers(false);
 	}
 }
 
 static void coreaudio_set_channels(struct coreaudio_data *ca, obs_data_t *settings)
 {
+	bfree(ca->channel_map);
 	ca->channel_map = bzalloc(sizeof(SInt32) * MAX_AUDIO_CHANNELS);
 
 	char *device_config_name = sanitize_device_name(ca->device_uid);
@@ -820,26 +855,160 @@ static void coreaudio_set_channels(struct coreaudio_data *ca, obs_data_t *settin
 	bfree(device_config_name);
 }
 
-static void coreaudio_update(void *data, obs_data_t *settings)
+static void coreaudio_apply_settings(struct coreaudio_data *ca, obs_data_t *settings, enum speaker_layout speakers)
 {
-	struct coreaudio_data *ca = data;
 	const char *new_id = obs_data_get_string(settings, "device_id");
-
-	if (!ca->input && strcmp(new_id, ca->device_uid) != 0)
-		obs_source_audio_output_capture_device_changed(ca->source, new_id);
-
-	coreaudio_shutdown(ca);
-
+	pthread_mutex_lock(&ca->mutex);
 	bfree(ca->device_uid);
 	ca->device_uid = bstrdup(new_id);
-
 	ca->enable_downmix = obs_data_get_bool(settings, "enable_downmix");
+	ca->speakers = speakers;
+	pthread_mutex_unlock(&ca->mutex);
 
 	if (!ca->enable_downmix) {
 		coreaudio_set_channels(ca, settings);
 	}
+}
 
-	coreaudio_try_init(ca);
+static void coreaudio_refresh_properties(void *data)
+{
+	struct coreaudio_data *ca = data;
+	pthread_mutex_lock(&ca->source_gate);
+	obs_source_t *source = ca->source_closed ? NULL : obs_weak_source_get_source(ca->weak_source);
+	pthread_mutex_unlock(&ca->source_gate);
+	if (source) { // Last-reference release precedes .destroy; an expired source must not emit Properties updates.
+		obs_source_update_properties(source);
+		obs_source_release(source); // Only UI tasks may hold references; the realtime callback must not.
+	}
+	pthread_mutex_lock(&ca->mutex);
+	ca->pending_property_updates--;
+	pthread_mutex_unlock(&ca->mutex);
+	coreaudio_reap_workers(false);
+}
+
+static void *coreaudio_worker(void *data)
+{
+	struct coreaudio_data *ca = data;
+	bool retry = false;
+	bool waiting_logged = false;
+	for (;;) {
+		pthread_mutex_lock(&ca->mutex);
+		bool stopping = ca->stopping;
+		obs_data_t *settings = ca->pending_settings;
+		enum speaker_layout speakers = ca->pending_speakers;
+		ca->pending_settings = NULL;
+		bool restart = ca->restart_requested;
+		unsigned long delay = ca->restart_delay;
+		ca->restart_requested = false;
+		pthread_mutex_unlock(&ca->mutex);
+		if (stopping) {
+			obs_data_release(settings);
+			break;
+		}
+		if (settings || restart || retry) {
+			coreaudio_uninit(ca);
+			if (settings) {
+				pthread_mutex_lock(&ca->mutex);
+				ca->restart_requested =
+					false; // Teardown drained old-device notifications; new listeners are not installed yet.
+				pthread_mutex_unlock(&ca->mutex);
+				coreaudio_apply_settings(ca, settings, speakers);
+				obs_data_release(settings);
+				waiting_logged = false;
+			} else if (restart) {
+				blog(LOG_INFO,
+				     "coreaudio: device '%s' disconnected or changed, attempting to reconnect",
+				     ca->device_name);
+				os_event_timedwait(ca->request_event, delay);
+				retry = true;
+				continue;
+			}
+			bool initialized = coreaudio_init(ca);
+			pthread_mutex_lock(&ca->mutex);
+			ca->properties_ready = initialized && !ca->stopping && !ca->pending_settings &&
+					       !ca->restart_requested;
+			bool ready = ca->properties_ready;
+			pthread_mutex_unlock(&ca->mutex);
+			if (ready) {
+				pthread_mutex_lock(&ca->source_gate);
+				if (!ca->source_closed) {
+					pthread_mutex_lock(&ca->mutex);
+					ca->pending_property_updates++;
+					pthread_mutex_unlock(&ca->mutex);
+					obs_queue_task(
+						OBS_TASK_UI, coreaudio_refresh_properties, ca,
+						false); // Only the UI thread emits the refresh; this task retains the closed gate until delivered.
+				}
+				pthread_mutex_unlock(&ca->source_gate);
+			}
+			retry = !initialized && !ca->no_devices;
+			if (!initialized && !waiting_logged) {
+				blog(LOG_INFO, "coreaudio: failed to initialize device uid: %s, %s", ca->device_uid,
+				     ca->no_devices ? "no device found" : "waiting for connection");
+				waiting_logged = true;
+			}
+		}
+		if (retry)
+			os_event_timedwait(ca->request_event, 2000);
+		else
+			os_event_wait(ca->request_event);
+	}
+	coreaudio_uninit(ca);
+	pthread_mutex_lock(&ca->mutex);
+	obs_data_release(ca->pending_settings);
+	ca->pending_settings = NULL;
+	bfree(ca->channel_map);
+	ca->channel_map = NULL;
+	bfree(ca->device_name);
+	ca->device_name = NULL;
+	bfree(ca->device_uid);
+	ca->device_uid = NULL;
+	bfree(ca->configured_device_uid);
+	ca->configured_device_uid = NULL;
+	pthread_mutex_unlock(&ca->mutex);
+	pthread_mutex_lock(&workers_mutex);
+	ca->worker_finished = true;
+	pthread_mutex_unlock(&workers_mutex);
+	return NULL;
+}
+
+static void coreaudio_update(void *data, obs_data_t *settings)
+{
+	struct coreaudio_data *ca = data;
+	obs_data_t *copy = obs_data_create();
+	obs_data_apply(copy, settings);
+	obs_data_set_string(copy, "device_id", obs_data_get_string(settings, "device_id"));
+	obs_data_set_bool(
+		copy, "enable_downmix",
+		obs_data_get_bool(
+			settings,
+			"enable_downmix")); // obs_data_apply copies user values only; materialize these defaults in the independent worker request.
+	pthread_mutex_lock(&ca->mutex);
+	if (ca->stopping) { // An RPC can still update a referenced source after the shutdown barrier stopped its worker.
+		pthread_mutex_unlock(&ca->mutex);
+		obs_data_release(copy);
+		return;
+	}
+	struct obs_audio_info audio_info;
+	enum speaker_layout speakers = obs_get_audio_info(&audio_info) ? audio_info.speakers : SPEAKERS_UNKNOWN;
+	const char *device_uid = obs_data_get_string(settings, "device_id");
+	bool device_changed = !ca->configured_device_uid || strcmp(ca->configured_device_uid, device_uid) != 0;
+	if (device_changed) {
+		bfree(ca->configured_device_uid);
+		ca->configured_device_uid = bstrdup(
+			device_uid); // Keep the configured ID separate from the worker's resolved default device, including Properties channel-map keys.
+	}
+	obs_data_t *previous = ca->pending_settings;
+	ca->pending_settings =
+		copy; // Rapid settings changes replace only the queued request, not a unit that macOS is still starting.
+	ca->pending_speakers =
+		speakers; // Profile audio resets may replace libobs audio state while the previous hardware start is pending.
+	ca->properties_ready = false;
+	os_event_signal(ca->request_event);
+	pthread_mutex_unlock(&ca->mutex);
+	obs_data_release(previous);
+	if (!ca->input && device_changed)
+		obs_source_audio_output_capture_device_changed(ca->source, device_uid);
 }
 
 static void coreaudio_defaults(obs_data_t *settings)
@@ -852,30 +1021,57 @@ static void *coreaudio_create(obs_data_t *settings, obs_source_t *source, bool i
 {
 	struct coreaudio_data *ca = bzalloc(sizeof(struct coreaudio_data));
 
-	if (os_event_init(&ca->exit_event, OS_EVENT_TYPE_MANUAL) != 0) {
+	if (pthread_mutex_init(&ca->mutex, NULL) != 0) {
+		bfree(ca);
+		return NULL;
+	}
+	if (pthread_mutex_init(&ca->source_gate, NULL) != 0) {
+		pthread_mutex_destroy(&ca->mutex);
+		bfree(ca);
+		return NULL;
+	}
+	if (os_event_init(&ca->request_event, OS_EVENT_TYPE_AUTO) != 0) {
 		blog(LOG_ERROR,
 		     "[coreaudio_create] failed to create "
 		     "semephore: %d",
 		     errno);
+		pthread_mutex_destroy(&ca->mutex);
+		pthread_mutex_destroy(&ca->source_gate);
 		bfree(ca);
 		return NULL;
 	}
 
-	ca->device_uid = bstrdup(obs_data_get_string(settings, "device_id"));
-	ca->source = source;
 	ca->input = input;
-	ca->enable_downmix = obs_data_get_bool(settings, "enable_downmix");
-
-	if (!ca->enable_downmix) {
-		coreaudio_set_channels(ca, settings);
+	ca->source = source;
+	ca->weak_source = obs_source_get_weak_source(source);
+	ca->notification_queue = dispatch_queue_create("OBS.CoreAudio.Notifications", DISPATCH_QUEUE_SERIAL);
+	ca->notification_block = Block_copy(^(UInt32 count, const AudioObjectPropertyAddress *addresses) {
+		notification_callback(0, count, addresses, ca);
+	});
+	coreaudio_update(ca, settings);
+	coreaudio_reap_workers(false);
+	pthread_mutex_lock(&workers_mutex);
+	int ret = pthread_create(&ca->worker, NULL, coreaudio_worker, ca);
+	if (ret == 0) {
+		ca->next_worker = workers;
+		workers = ca;
 	}
-
-	if (!ca->device_uid)
-		ca->device_uid = bstrdup("default");
-
-	coreaudio_try_init(ca);
-	if (!ca->input)
-		obs_source_audio_output_capture_device_changed(source, ca->device_uid);
+	pthread_mutex_unlock(&workers_mutex);
+	if (ret != 0) {
+		blog(LOG_ERROR, "coreaudio: failed to create audio worker: %d", ret);
+		if (!ca->input)
+			obs_source_audio_output_capture_device_changed(source, NULL);
+		obs_data_release(ca->pending_settings);
+		bfree(ca->configured_device_uid);
+		obs_weak_source_release(ca->weak_source);
+		Block_release(ca->notification_block);
+		dispatch_release(ca->notification_queue);
+		os_event_destroy(ca->request_event);
+		pthread_mutex_destroy(&ca->mutex);
+		pthread_mutex_destroy(&ca->source_gate);
+		bfree(ca);
+		return NULL;
+	}
 
 	return ca;
 }
@@ -940,7 +1136,7 @@ static void ensure_output_channel_prop(const struct coreaudio_data *ca, obs_prop
 
 static void ensure_output_channels_visible(obs_properties_t *props, const struct coreaudio_data *ca, uint32_t channels)
 {
-	char *device_config_name = sanitize_device_name(ca->device_uid);
+	char *device_config_name = sanitize_device_name(ca->configured_device_uid);
 	for (uint32_t out_chan = 0; out_chan < channels; out_chan++) {
 		ensure_output_channel_prop(ca, props, device_config_name, out_chan);
 	}
@@ -961,12 +1157,14 @@ static bool coreaudio_device_changed(void *data, obs_properties_t *props, obs_pr
 {
 	struct coreaudio_data *ca = data;
 	if (ca != NULL) {
+		pthread_mutex_lock(&ca->mutex);
 		hide_all_output_channels(props);
 
-		if (!ca->enable_downmix) {
+		if (ca->properties_ready && !obs_data_get_bool(settings, "enable_downmix")) {
 			uint32_t channels = get_audio_channels(ca->speakers);
 			ensure_output_channels_visible(props, ca, channels);
 		}
+		pthread_mutex_unlock(&ca->mutex);
 	}
 	UNUSED_PARAMETER(p);
 	UNUSED_PARAMETER(settings);
@@ -978,15 +1176,16 @@ static bool coreaudio_downmix_changed(void *data, obs_properties_t *props, obs_p
 {
 	struct coreaudio_data *ca = data;
 	if (ca != NULL) {
+		pthread_mutex_lock(&ca->mutex);
 		bool enable_downmix = obs_data_get_bool(settings, "enable_downmix");
-		ca->enable_downmix = enable_downmix;
 
 		hide_all_output_channels(props);
 
-		if (!ca->enable_downmix) {
+		if (ca->properties_ready && !enable_downmix) {
 			uint32_t channels = get_audio_channels(ca->speakers);
 			ensure_output_channels_visible(props, ca, channels);
 		}
+		pthread_mutex_unlock(&ca->mutex);
 	}
 
 	return true;
@@ -1019,7 +1218,9 @@ static obs_properties_t *coreaudio_properties(bool input, void *data)
 	property = obs_properties_add_bool(props, "enable_downmix", obs_module_text("CoreAudio.Downmix"));
 	obs_property_set_modified_callback2(property, coreaudio_downmix_changed, ca);
 
-	if (ca != NULL && ca->au_initialized) {
+	if (ca != NULL)
+		pthread_mutex_lock(&ca->mutex);
+	if (ca != NULL && ca->properties_ready) {
 		uint32_t channels = get_audio_channels(ca->speakers);
 		ensure_output_channels_visible(props, ca, channels);
 
@@ -1027,6 +1228,8 @@ static obs_properties_t *coreaudio_properties(bool input, void *data)
 			hide_all_output_channels(props);
 		}
 	}
+	if (ca != NULL)
+		pthread_mutex_unlock(&ca->mutex);
 
 	device_list_free(&devices);
 	return props;
@@ -1053,6 +1256,8 @@ struct obs_source_info coreaudio_input_capture_info = {
 	.get_defaults = coreaudio_defaults,
 	.get_properties = coreaudio_input_properties,
 	.icon_type = OBS_ICON_TYPE_AUDIO_INPUT,
+	.type_data = &workers,
+	.free_type_data = coreaudio_free_type_data,
 };
 
 struct obs_source_info coreaudio_output_capture_info = {
