@@ -57,6 +57,17 @@ even after reconnect succeeds. Publish running state before thread creation and
 clear it if creation fails. The harness verifies ten finished-worker cycles with
 real pthread creation/join and a controlled worker, without accessing hardware.
 
+CoreAudio creation and update initialize the device synchronously on their caller;
+scene-collection loading calls creation on the UI thread. A live process sample
+can therefore show the entire interface waiting in `AudioOutputUnitStart` and
+CoreAudio's `StartAndWaitForState` while Metal rendering continues normally.
+Confirm that boundary with a process sample and the gap before the device's
+initialized log; stable memory and continuing rendering do not establish a
+responsive interface. The health timer also runs on the UI thread, so its silence
+during this wait does not mean the process exited. Diagnose the audio-service
+delay separately from the inherited OBS blocking-start behavior; neither a
+nearby Bluetooth event nor the selected renderer establishes its cause.
+
 ## CPU accounting must use one cumulative whole-task query
 
 Separate Mach reads of live-thread and terminated-thread CPU totals can count
