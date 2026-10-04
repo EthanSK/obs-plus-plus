@@ -152,6 +152,17 @@ the high-resolution modes, switching OBS source implementations cannot add
 them. A degraded USB link establishes the negotiated state, not which cable,
 connector, firmware or host-controller condition caused it.
 
+A targeted software USB reconnection is possible, but API success does not
+prove high-speed recovery. On this Mac, an ordinary `IOUSBHostDevice` client
+with `IOUSBHostObjectInitOptionsNone` could call `resetWithError:` for the
+uniquely identified video device without administrator authorization, device
+capture or device seize. OBS logged its disconnect and reconnect and IORegistry
+created a new device object, yet the link remained 480 Mbps and independent
+AVFoundation discovery still advertised at most 1280x720. Audit every output
+before this interruption, preserve source settings, and verify both USB speed
+and formats afterward; do not equate a logical reset with removing device power
+or repairing the physical SuperSpeed connection.
+
 ## Keep the Metal drawable pool around the full preview frame
 
 OBS upstream merged PR #13664 into its 33.0 development line on 17 September
