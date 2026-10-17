@@ -78,10 +78,10 @@ cmake --preset macos \
   -DOBS_VERSION_OVERRIDE=32.2.2-obs-plus-plus \
   -DOBS_CODESIGN_IDENTITY=- \
   -DENABLE_VIRTUALCAM=OFF
-cmake --build build_macos --config RelWithDebInfo --parallel 4
+cmake --build build_macos.noindex --config RelWithDebInfo --parallel 4
 ```
 
-The app is `build_macos/frontend/RelWithDebInfo/OBS++.app`. Quit OBS before
+The app is `build_macos.noindex/frontend/RelWithDebInfo/OBS++.app`. Quit OBS before
 replacing an installed app, keep a copy of your profile/scene configuration,
 then install the built bundle in Applications. OBS++ shares the usual
 `obs-studio` settings directory with OBS; it is not an isolated second profile
@@ -92,6 +92,11 @@ extension. It does not produce a notarized public installer. Use your own Apple
 signing setup and the upstream build documentation if you need the extension
 or intend to distribute a signed app.
 
-The commands and output paths match the repository presets and existing local
-build artifacts. This documentation update did not perform a fresh native
+New builds use `build_macos.noindex` so disposable app copies stay out of
+Spotlight. Existing `build_macos` caches and artifacts remain in place. CI keeps
+retained release archives and debug symbols in the indexed `release-symbols/`
+directory for crash symbolication.
+
+The commands and output paths match the repository presets. This documentation
+update did not perform a fresh native
 build, replace the installed app or test recovery against the live recording.

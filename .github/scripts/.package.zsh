@@ -124,7 +124,7 @@ package() {
   }
 
   if [[ ${host_os} == macos ]] {
-    if [[ ! -d 'build_macos/OBS++.app' ]] {
+    if [[ ! -d 'build_macos.noindex/OBS++.app' ]] {
       log_error 'No application bundle found. Run the build script to create a valid application bundle.'
       return 0
     }
@@ -140,7 +140,7 @@ package() {
     }
 
     if (( package )) {
-      pushd build_macos
+      pushd build_macos.noindex
 
       mkdir -p obs-plus-plus/.background
       cp ${project_root}/cmake/macos/resources/background.tiff obs-plus-plus/.background/
@@ -187,17 +187,25 @@ package() {
       popd
     } else {
       log_group "Archiving obs-plus-plus..."
-      pushd build_macos
+      pushd build_macos.noindex
       XZ_OPT=-T0 tar -cvJf ${output_name}.tar.xz 'OBS++.app'
       popd
     }
 
     if [[ ${config} == Release ]] {
       log_group "Archiving debug symbols..."
-      mkdir -p build_macos/dSYMs
-      pushd build_macos/dSYMs
+      mkdir -p release-symbols/dSYMs
+      pushd release-symbols/dSYMs
       rm -rf -- *.dSYM(N)
-      cp -pR ${PWD:h}/**/*.dSYM .
+      local -a symbol_sources=(
+        ${project_root}/build_macos.noindex/**/*.dSYM(N)
+        ${project_root}/release-symbols/obs-studio.xcarchive/dSYMs/*.dSYM(N)
+      )
+      if (( ! ${#symbol_sources} )) {
+        log_error 'No debug symbols found for the release.'
+        return 2
+      }
+      cp -pR ${symbol_sources} .
       XZ_OPT=-T0 tar -cvJf ${output_name}-dSYMs.tar.xz -- *
       mv ${output_name}-dSYMs.tar.xz ${PWD:h}
       popd

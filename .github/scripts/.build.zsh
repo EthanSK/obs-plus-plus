@@ -165,7 +165,7 @@ build() {
         -project obs-studio.xcodeproj
         -scheme obs-studio
         -destination "generic/platform=macOS,name=Any Mac"
-        -archivePath obs-studio.xcarchive
+        -archivePath ${project_root}/release-symbols/obs-studio.xcarchive
         -parallelizeTargets
         -hideShellScriptEnvironment
         archive
@@ -173,9 +173,9 @@ build() {
 
       local -a export_args=(
         -exportArchive
-        -archivePath obs-studio.xcarchive
+        -archivePath ${project_root}/release-symbols/obs-studio.xcarchive
         -exportOptionsPlist exportOptions.plist
-        -exportPath ${project_root}/build_macos
+        -exportPath ${project_root}/build_macos.noindex
       )
 
       local -a analyze_args=(
@@ -190,11 +190,12 @@ build() {
         analyze
       )
 
-      pushd build_macos
+      pushd build_macos.noindex
       if (( analyze )) {
         run_xcodebuild ${analyze_args}
       } else {
         if [[ ${GITHUB_EVENT_NAME} == push && ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]] {
+          mkdir -p ${project_root}/release-symbols
           run_xcodebuild ${archive_args}
           run_xcodebuild ${export_args}
         } else {

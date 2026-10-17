@@ -274,7 +274,7 @@ Run the isolated regression suite against an existing RelWithDebInfo build:
 
 ```sh
 test_output_dir=$(mktemp -d)
-bash test/osx/run-resource-lifetime-tests.sh build_macos "$test_output_dir"
+bash test/osx/run-resource-lifetime-tests.sh build_macos.noindex "$test_output_dir"
 ```
 
 The suite calls the actual encoder/capture implementation with controlled failure
@@ -381,3 +381,11 @@ recoverable backup and reconfigure to rediscover them. Otherwise CMake can put
 the new SDK's C headers before libc++ and break `<cstddef>` or `<cfenv>`. Preserve
 the build cache and its existing feature, dependency and signing choices.
 Do not change source include paths or recreate the removed SDK directory.
+
+## Keep new macOS app output out of Spotlight
+
+The macOS CMake preset and CI consumers use `build_macos.noindex` for newly
+generated apps. Preserve existing `build_macos` caches and artifacts; changing
+the future output path does not migrate them or require an installed-app restart.
+Retained release `.xcarchive` and `.dSYM` output belongs in `release-symbols/`,
+outside `.noindex`, so Spotlight can still locate symbols for crash reports.

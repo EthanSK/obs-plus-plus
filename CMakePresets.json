@@ -94,7 +94,7 @@
         "rhs": "Darwin"
       },
       "generator": "Xcode",
-      "binaryDir": "${sourceDir}/build_macos",
+      "binaryDir": "${sourceDir}/build_macos.noindex",
       "cacheVariables": {
         "CMAKE_OSX_DEPLOYMENT_TARGET": {"type": "STRING", "value": "13.0"},
         "OBS_CODESIGN_IDENTITY": {"type": "STRING", "value": "$penv{CODESIGN_IDENT}"},

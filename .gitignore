@@ -1,6 +1,11 @@
 # Exclude everything
 /*
 
+# Generated macOS apps stay unindexed; retain the legacy cache and indexed symbols.
+/build_macos/
+/build_macos.noindex/
+/release-symbols/
+
 # Except for default project files
 !/.github
 !/build-aux
