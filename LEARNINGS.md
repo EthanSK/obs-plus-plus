@@ -389,3 +389,38 @@ generated apps. Preserve existing `build_macos` caches and artifacts; changing
 the future output path does not migrate them or require an installed-app restart.
 Retained release `.xcarchive` and `.dSYM` output belongs in `release-symbols/`,
 outside `.noindex`, so Spotlight can still locate symbols for crash reports.
+
+## Scene-collection crashes can originate in Qt's cursor conversion
+
+Two 19 October 2026 crash reports entered `OBSBasic::ClearSceneData()` and
+crashed in `setCursor(Qt::WaitCursor)`, before source cleanup. The stack ended
+in `QImage::toCGImage`, `CGImageCreate`, `CGColorSpaceGetType`, and a CoreFoundation
+pointer-authentication trap. This is not evidence of an SCK callback, Metal,
+or another application's interference.
+
+Bundled Qt 6.11.1 contains QTBUG-147602: `qt_mac_cgImageFormatForImage` returns a
+raw color-space pointer after its local owning `QCFType` has released it.
+Qt upstream commit `08e464f8559719662c5b2207d1d4c84c251eca07` fixes the returned
+format's ownership. Keep the normal busy cursor and source-cleanup sequence;
+backport the library fix instead of skipping scene cleanup or hiding the cursor.
+
+`cmake/macos/build-qt-colorspace-fix.sh QT_PREFIX WORK_DIR.noindex` downloads
+checksum-pinned Qt 6.11.1 source and that exact upstream patch, builds QtGui,
+and produces `WORK_DIR.noindex/patched-qt.noindex`. It leaves the original Qt
+dependency and all other Qt libraries unchanged. Configure OBS with that prefix
+first in `CMAKE_PREFIX_PATH`. `qt-colorspace-safety.cmake` checks the actual QtGui
+selected during configuration, preventing a future build from silently shipping
+the old library again.
+
+Run `test/osx/run-qt-colorspace-test.sh QT_PREFIX OUTPUT_DIR [RUNTIME_FRAMEWORK_DIR]`
+against both the candidate and installed frameworks. The isolated test interposes
+CoreGraphics creation and CoreFoundation release only in its own process. Ordinary
+image conversion can appear successful because macOS caches color spaces; this
+test checks ownership before `CGImageCreate` and requires instrumentation to be
+active. The original installed Qt failed that deterministic check.
+
+A separate live scene-switch sample blocked the main thread in `AudioOutputUnitStart`
+from `coreaudio_create`. The installed September capture plug-in lacked the
+already committed `a43fb55a3` worker fix, while the October build contained it.
+Audit and install capture plug-ins independently of the executable and QtGui;
+fixing the cursor crash alone cannot resolve synchronous CoreAudio startup.

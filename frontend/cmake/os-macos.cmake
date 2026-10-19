@@ -1,4 +1,5 @@
 include(cmake/feature-sparkle.cmake)
+include("${CMAKE_SOURCE_DIR}/cmake/macos/qt-colorspace-safety.cmake")
 
 target_sources(
   obs-studio
