@@ -14,6 +14,9 @@ static atomic_bool completion_called;
 static void (^pending_completion)(SCShareableContent *, NSError *);
 static int fail_output_number, output_count;
 static bool fail_start, stop_after_start;
+static bool defer_start;
+static NSMutableArray *pending_starts;
+static int stream_stops, property_updates;
 
 @interface TestDisplay : NSObject
 - (CGDirectDisplayID)displayID;
@@ -53,13 +56,20 @@ static bool fail_start, stop_after_start;
 }
 - (void)startCaptureWithCompletionHandler:(void (^)(NSError *))completion
 {
+    if (defer_start) {
+        [pending_starts addObject:[[completion copy] autorelease]];
+        return;
+    }
     completion(fail_start ? [NSError errorWithDomain:@"controlled-start-failure" code:18 userInfo:nil] : nil);
     if (stop_after_start) {
         [self.delegate stream:(SCStream *)self didStopWithError:
             [NSError errorWithDomain:@"controlled-immediate-stop" code:19 userInfo:nil]];
     }
 }
-- (void)stopCaptureWithCompletionHandler:(void (^)(NSError *))completion { completion(nil); }
+- (void)stopCaptureWithCompletionHandler:(void (^)(NSError *))completion {
+    stream_stops++;
+    if (completion) completion(nil);
+}
 @end
 
 static id test_filter_init(id object, SEL selector, SCDisplay *display, NSArray *windows)
@@ -102,7 +112,7 @@ static void test_content_request(id object, SEL selector, BOOL exclude_desktop, 
 }
 
 static void test_graphics(void) {}
-static void test_update_properties(obs_source_t *source) { (void) source; }
+static void test_update_properties(obs_source_t *source) { (void) source; property_updates++; }
 static int test_device_type(void) { return GS_DEVICE_OPENGL; }
 static gs_effect_t *test_effect(enum obs_base_effect effect) { (void) effect; return (gs_effect_t *) 1; }
 static CGDirectDisplayID test_display_settings(obs_data_t *settings) { (void) settings; return CGMainDisplayID(); }
@@ -255,6 +265,54 @@ int main(void)
         assert(bnum_allocs() == baseline);
         puts("PASS: initial output/start failures retain a source that recovers on a later successful retry");
         puts("PASS: a delegate stop immediately after successful start remains failed and retryable");
+
+        pending_starts = [[NSMutableArray alloc] init];
+        defer_start = true;
+        settings = obs_data_create();
+        capture =
+#ifdef TEST_AUDIO_CAPTURE
+            sck_audio_capture_create(settings, NULL);
+#else
+            sck_video_capture_create(settings, NULL);
+#endif
+        assert(capture && pending_starts.count == 1); // Creation must return even when macOS has not called start completion.
+        destroy_capture(capture);
+        int updates_before_late_start = property_updates;
+        int stops_before_late_start = stream_stops;
+        void (^late_start)(NSError *) = [[pending_starts objectAtIndex:0] retain];
+        [pending_starts removeAllObjects];
+        late_start(nil);
+        [late_start release];
+        assert(property_updates == updates_before_late_start && stream_stops == stops_before_late_start + 1);
+        puts("PASS: deferred start cannot block creation, and success after destruction stops the obsolete stream without touching freed source data");
+
+        capture =
+#ifdef TEST_AUDIO_CAPTURE
+            sck_audio_capture_create(settings, NULL);
+#else
+            sck_video_capture_create(settings, NULL);
+#endif
+        assert(pending_starts.count == 1);
+        capture->capture_failed = true;
+        obs_properties_t *props = obs_properties_create();
+        obs_property_t *button = obs_properties_add_button2(props, "restart", "restart", reactivate_capture, capture);
+        assert(reactivate_capture(props, button, capture));
+        assert(pending_starts.count == 2 && !capture->capture_failed);
+        void (^old_start)(NSError *) = [[pending_starts objectAtIndex:0] retain];
+        void (^new_start)(NSError *) = [[pending_starts objectAtIndex:1] retain];
+        [pending_starts removeAllObjects];
+        old_start([NSError errorWithDomain:@"obsolete-start" code:20 userInfo:nil]);
+        assert(!capture->capture_failed);
+        new_start([NSError errorWithDomain:@"current-start" code:21 userInfo:nil]);
+        assert(capture->capture_failed);
+        [old_start release];
+        [new_start release];
+        obs_properties_destroy(props);
+        destroy_capture(capture);
+        obs_data_release(settings);
+        [pending_starts release];
+        defer_start = false;
+        puts("PASS: replaced-stream completion cannot overwrite current failure state; the current asynchronous error remains retryable");
         method_setImplementation(filter_method, original_filter);
         method_setImplementation(stream_method, original_stream);
         method_setImplementation(method, original);

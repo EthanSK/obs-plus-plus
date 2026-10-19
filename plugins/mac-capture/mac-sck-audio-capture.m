@@ -7,8 +7,13 @@ const char *sck_audio_capture_getname(void *unused __unused)
 
 API_AVAILABLE(macos(13.0)) static void destroy_audio_screen_stream(struct screen_capture *sc)
 {
-    if (sc->disp && !sc->capture_failed) {
-        [sc->disp stopCaptureWithCompletionHandler:^(NSError *_Nullable error) {
+    SCStream *stream;
+    @synchronized(sc->capture_delegate) {
+        stream = sc->disp;
+        sc->disp = nil; // Reject late start/output/stop callbacks before releasing the old stream.
+    }
+    if (stream) {
+        [stream stopCaptureWithCompletionHandler:^(NSError *_Nullable error) {
             if (error && error.code != SCStreamErrorAttemptToStopStreamState) {
                 MACCAP_ERR("destroy_audio_screen_stream: Failed to stop stream with error %s\n",
                            [[error localizedFailureReason] cStringUsingEncoding:NSUTF8StringEncoding]);
@@ -21,13 +26,7 @@ API_AVAILABLE(macos(13.0)) static void destroy_audio_screen_stream(struct screen
         sc->stream_properties = NULL;
     }
 
-    if (sc->disp) {
-        [sc->disp release];
-        sc->disp = NULL;
-    }
-
-    os_event_destroy(sc->stream_start_completed);
-    sc->stream_start_completed = NULL;
+    [stream release];
 }
 
 API_AVAILABLE(macos(13.0)) static void sck_audio_capture_destroy(void *data)
@@ -37,6 +36,9 @@ API_AVAILABLE(macos(13.0)) static void sck_audio_capture_destroy(void *data)
     if (!sc)
         return;
 
+    @synchronized(sc->capture_delegate) {
+        sc->capture_delegate.sc = NULL; // Pending native callbacks must not read the source after teardown frees it.
+    }
     destroy_audio_screen_stream(sc);
 
     if (sc->shareable_content_available) { // Failed or pending inventory requests still own the semaphore and callback context.
@@ -77,7 +79,6 @@ API_AVAILABLE(macos(13.0)) static bool init_audio_screen_stream(struct screen_ca
         MACCAP_ERR("init_audio_screen_stream: Invalid target display ID: %u", sc->display);
         os_sem_post(sc->shareable_content_available);
         sc->disp = NULL;
-        os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
         obs_source_update_properties(sc->source);
         return true;
     }
@@ -128,8 +129,11 @@ API_AVAILABLE(macos(13.0)) static bool init_audio_screen_stream(struct screen_ca
         [sc->stream_properties setChannelCount:channel_count];
     }
 
-    sc->disp = [[SCStream alloc] initWithFilter:content_filter configuration:sc->stream_properties
-                                       delegate:sc->capture_delegate];
+    SCStream *stream = [[SCStream alloc] initWithFilter:content_filter configuration:sc->stream_properties
+                                             delegate:sc->capture_delegate];
+    @synchronized(sc->capture_delegate) {
+        sc->disp = stream;
+    }
     [content_filter release];
 
     //add a dummy video stream output to silence errors from SCK. frames are dropped by the delegate
@@ -156,26 +160,10 @@ API_AVAILABLE(macos(13.0)) static bool init_audio_screen_stream(struct screen_ca
         obs_source_update_properties(sc->source);
         return false;
     }
-    os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
-
-    __block BOOL did_stream_start = false;
-    sc->capture_failed = false; // A delegate stop after start completion must not be overwritten when this function returns.
-    [sc->disp startCaptureWithCompletionHandler:^(NSError *_Nullable error2) {
-        did_stream_start = (BOOL) (error2 == nil);
-        if (!did_stream_start) {
-            sc->capture_failed = true;
-            MACCAP_ERR("init_audio_screen_stream: Failed to start capture domain=%s code=%ld: %s",
-                       error2.domain.UTF8String, (long) error2.code, error2.localizedDescription.UTF8String);
-            // Clean up disp so it isn't stopped
-            [sc->disp release];
-            sc->disp = NULL;
-        }
-        os_event_signal(sc->stream_start_completed);
-    }];
-    os_event_wait(sc->stream_start_completed);
+    screen_capture_start_stream(sc);
 
     obs_source_update_properties(sc->source);
-    return did_stream_start;
+    return !sc->capture_failed;
 }
 
 static void sck_audio_capture_defaults(obs_data_t *settings)

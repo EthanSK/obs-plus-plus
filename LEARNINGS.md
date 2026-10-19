@@ -6,12 +6,12 @@ A failed asynchronous inventory refresh must clear the pointer immediately
 after releasing the previous `SCShareableContent`. The callback posts the
 inventory semaphore on success and failure; destruction must wait on that
 semaphore even when the inventory pointer is nil, otherwise the pending callback
-can write into freed source state. Clear destroyed start-event handles before
-another initialization attempt so an early failure cannot destroy them twice.
+can write into freed source state. Stream startup no longer owns a start-event
+handle: it uses the asynchronous completion and the delegate lifetime gate below.
 
 Keep capture marked failed while configuring outputs, clear it immediately
-before requesting start, and set it on start failure. Do not clear it again after
-the completion wait: a delegate stop can arrive between completion and return.
+before requesting start, and set it on start failure. Do not clear it again in
+the success completion: a delegate stop can arrive before that completion.
 `NSError` out-parameters are not caller-owned; do not release them on
 failure. Audio-only capture needs the same fresh inventory and current main
 display identity on retry. A missing display must leave a retryable source, not
@@ -31,6 +31,26 @@ It reproduces failed-refresh ownership and pending-callback teardown without
 capturing a display, plus initial add-output/start failure and a subsequent
 successful retry and an immediate delegate stop using isolated stream substitutes. This is not proof that
 every physical hotplug succeeds.
+
+Live collection switches on 19 October 2026 proved both audio-only and video
+ScreenCaptureKit creation blocked the UI in `os_event_wait` while native audio
+startup took 43-54 seconds. Keep stream start asynchronous for both variants;
+neither a timeout followed by freeing its callback data nor nested UI event
+processing is an ownership-safe fix. The common helper retains only the stream
+and delegate in the native completion. The delegate's synchronized gate checks
+the current stream, ignores replaced-stream callbacks, and is detached before
+source destruction. A successful obsolete start is explicitly stopped. Never
+hold the delegate gate while calling native start/stop or entering graphics.
+Failure is atomic because native callbacks write it while Properties reads it.
+Start-request and actual completion logs include elapsed time and native errors;
+an accepted async request is not proof capture already started.
+
+The isolated lifetime harness additionally defers native startup indefinitely,
+requires creation/destruction to return, then delivers success after source
+destruction and stale/current failures after replacement. Late success must stop
+the obsolete stream without touching freed source state; stale errors must not
+overwrite the replacement's state. These tests use controlled native substitutes,
+not real hotplug or proof that Apple's audio services cannot stall again.
 
 Queue Properties and Filters reloads even when the source emits its update on
 the UI thread. A direct reload can free the clicked property's controls before

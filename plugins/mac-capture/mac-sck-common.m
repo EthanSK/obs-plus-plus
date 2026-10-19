@@ -1,4 +1,5 @@
 #include "mac-sck-common.h"
+#include <util/platform.h>
 
 bool is_screen_capture_available(void)
 {
@@ -15,12 +16,14 @@ bool is_screen_capture_available(void)
 
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type
 {
-    if (self.sc != NULL) {
-        if (type == SCStreamOutputTypeScreen && !self.sc->audio_only) {
-            screen_stream_video_update(self.sc, sampleBuffer);
-        } else if (@available(macOS 13.0, *)) {
-            if (type == SCStreamOutputTypeAudio) {
-                screen_stream_audio_update(self.sc, sampleBuffer);
+    @synchronized(self) { // Teardown detaches the source under this same gate before freeing its context.
+        if (self.sc != NULL && self.sc->disp == stream) {
+            if (type == SCStreamOutputTypeScreen && !self.sc->audio_only) {
+                screen_stream_video_update(self.sc, sampleBuffer);
+            } else if (@available(macOS 13.0, *)) {
+                if (type == SCStreamOutputTypeAudio) {
+                    screen_stream_audio_update(self.sc, sampleBuffer);
+                }
             }
         }
     }
@@ -28,30 +31,65 @@ bool is_screen_capture_available(void)
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error
 {
-    NSString *errorMessage;
-    switch (error.code) {
-        case SCStreamErrorUserStopped:
-            errorMessage = @"User stopped stream.";
-            break;
-        case SCStreamErrorNoCaptureSource:
-            errorMessage = @"Stream stopped as no capture source was not found.";
-            break;
-        default:
-            errorMessage = [NSString stringWithFormat:@"Stream stopped with error %ld (\"%s\")", error.code,
-                                                      error.localizedDescription.UTF8String];
-            break;
+    @synchronized(self) {
+        if (!self.sc || self.sc->disp != stream)
+            return; // A replaced or destroyed stream can still deliver its final delegate callback.
+        NSString *errorMessage;
+        switch (error.code) {
+            case SCStreamErrorUserStopped:
+                errorMessage = @"User stopped stream.";
+                break;
+            case SCStreamErrorNoCaptureSource:
+                errorMessage = @"Stream stopped as no capture source was not found.";
+                break;
+            default:
+                errorMessage = [NSString stringWithFormat:@"Stream stopped with error %ld (\"%s\")", error.code,
+                                                          error.localizedDescription.UTF8String];
+                break;
+        }
+
+        MACCAP_LOG(LOG_WARNING, "source='%s' display=%u type=%d audio_only=%d domain=%s code=%ld: %s",
+                   obs_source_get_name(self.sc->source), self.sc->display,
+                   self.sc->audio_only ? (int) self.sc->audio_capture_type : (int) self.sc->capture_type,
+                   self.sc->audio_only, error.domain.UTF8String, (long) error.code, errorMessage.UTF8String);
+
+        self.sc->capture_failed = true;
+        obs_source_update_properties(self.sc->source);
     }
-
-    MACCAP_LOG(LOG_WARNING, "source='%s' display=%u type=%d audio_only=%d domain=%s code=%ld: %s",
-               obs_source_get_name(self.sc->source), self.sc->display,
-               self.sc->audio_only ? (int) self.sc->audio_capture_type : (int) self.sc->capture_type,
-               self.sc->audio_only, error.domain.UTF8String, (long) error.code, errorMessage.UTF8String);
-
-    self.sc->capture_failed = true;
-    obs_source_update_properties(self.sc->source);
 }
 
 @end
+
+void screen_capture_start_stream(struct screen_capture *sc)
+{
+    SCStream *stream = sc->disp;
+    ScreenCaptureDelegate *delegate = sc->capture_delegate;
+    uint64_t started_at = os_gettime_ns();
+    sc->capture_failed = false; // Preserve an immediate delegate stop instead of clearing its failure on completion.
+    MACCAP_LOG(LOG_INFO, "source='%s' display=%u audio_only=%d: requesting asynchronous stream start",
+               obs_source_get_name(sc->source), sc->display, sc->audio_only);
+    [stream startCaptureWithCompletionHandler:^(NSError *_Nullable error) {
+        bool obsolete;
+        @synchronized(delegate) { // The block retains the delegate and stream, never a raw source context across the async boundary.
+            struct screen_capture *current = delegate.sc;
+            obsolete = !current || current->disp != stream;
+            if (!obsolete) {
+                if (error)
+                    current->capture_failed = true;
+                MACCAP_LOG(error ? LOG_ERROR : LOG_INFO,
+                           "source='%s' display=%u audio_only=%d: stream start completed in %llu ms, domain=%s code=%ld: %s",
+                           obs_source_get_name(current->source), current->display, current->audio_only,
+                           (unsigned long long) ((os_gettime_ns() - started_at) / 1000000),
+                           error ? error.domain.UTF8String : "none", (long) error.code,
+                           error ? error.localizedDescription.UTF8String : "started");
+                obs_source_update_properties(current->source);
+            }
+        }
+        if (obsolete && !error) { // A successful late start must not leave capture running after its source was removed or replaced.
+            [stream stopCaptureWithCompletionHandler:nil];
+        }
+    }]; // ScreenCaptureKit and CoreAudio took 43-54 seconds during live collection switches; never wait for them on OBS's UI thread.
+}
 
 #pragma mark - obs_properties
 

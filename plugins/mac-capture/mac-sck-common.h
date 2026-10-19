@@ -5,6 +5,7 @@
 #include <obs-module.h>
 #include <util/threading.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 #include <IOSurface/IOSurface.h>
 #include <ScreenCaptureKit/ScreenCaptureKit.h>
@@ -52,10 +53,9 @@ struct API_AVAILABLE(macos(12.5)) screen_capture {
     SCShareableContent *shareable_content;
     ScreenCaptureDelegate *capture_delegate;
 
-    os_event_t *stream_start_completed;
     os_sem_t *shareable_content_available;
     IOSurfaceRef current, prev;
-    bool capture_failed;
+    atomic_bool capture_failed; // Async start/stop callbacks publish failure while Properties reads it on the UI thread.
 
     uint64_t texture_failures;
     uint64_t last_texture_error_log_ns;
@@ -72,6 +72,8 @@ struct API_AVAILABLE(macos(12.5)) screen_capture {
 bool is_screen_capture_available(void);
 
 API_AVAILABLE(macos(12.5)) void screen_capture_build_content_list(struct screen_capture *sc, bool display_capture);
+
+API_AVAILABLE(macos(12.5)) void screen_capture_start_stream(struct screen_capture *sc);
 
 API_AVAILABLE(macos(12.5)) bool build_display_list(struct screen_capture *sc, obs_properties_t *props);
 

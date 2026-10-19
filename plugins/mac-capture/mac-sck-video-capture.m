@@ -8,8 +8,13 @@ API_AVAILABLE(macos(12.5)) static void destroy_screen_stream(struct screen_captu
         MACCAP_LOG(LOG_INFO, "source='%s' display=%u texture_failures=%llu at stream teardown",
                    obs_source_get_name(sc->source), sc->display, (unsigned long long) sc->texture_failures);
     }
-    if (sc->disp && !sc->capture_failed) {
-        [sc->disp stopCaptureWithCompletionHandler:^(NSError *_Nullable error) {
+    SCStream *stream;
+    @synchronized(sc->capture_delegate) {
+        stream = sc->disp;
+        sc->disp = nil; // Reject late start/output/stop callbacks before releasing the old stream.
+    }
+    if (stream) {
+        [stream stopCaptureWithCompletionHandler:^(NSError *_Nullable error) {
             if (error && error.code != SCStreamErrorAttemptToStopStreamState) {
                 MACCAP_ERR("destroy_screen_stream: Failed to stop stream with error %s\n",
                            [[error localizedFailureReason] cStringUsingEncoding:NSUTF8StringEncoding]);
@@ -39,13 +44,7 @@ API_AVAILABLE(macos(12.5)) static void destroy_screen_stream(struct screen_captu
         sc->prev = NULL;
     }
 
-    if (sc->disp) {
-        [sc->disp release];
-        sc->disp = NULL;
-    }
-
-    os_event_destroy(sc->stream_start_completed);
-    sc->stream_start_completed = NULL;
+    [stream release];
 }
 
 API_AVAILABLE(macos(12.5)) static void sck_video_capture_destroy(void *data)
@@ -55,6 +54,9 @@ API_AVAILABLE(macos(12.5)) static void sck_video_capture_destroy(void *data)
     if (!sc)
         return;
 
+    @synchronized(sc->capture_delegate) {
+        sc->capture_delegate.sc = NULL; // Pending native callbacks must not read the source after teardown frees it.
+    }
     obs_enter_graphics();
 
     destroy_screen_stream(sc);
@@ -110,7 +112,6 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
                 MACCAP_ERR("init_screen_stream: Invalid target display ID:  %u\n", sc->display);
                 os_sem_post(sc->shareable_content_available);
                 sc->disp = NULL;
-                os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
                 sc->capture_failed = true;
                 obs_source_update_properties(sc->source);
                 return true;
@@ -153,7 +154,6 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
                 MACCAP_ERR("init_screen_stream: Invalid target window ID:  %u\n", sc->window);
                 os_sem_post(sc->shareable_content_available);
                 sc->disp = NULL;
-                os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
                 sc->capture_failed = true;
                 obs_source_update_properties(sc->source);
                 return true;
@@ -174,7 +174,6 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
                 MACCAP_ERR("init_screen_stream: Invalid target display ID:  %u\n", sc->display);
                 os_sem_post(sc->shareable_content_available);
                 sc->disp = NULL;
-                os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
                 sc->capture_failed = true;
                 obs_source_update_properties(sc->source);
                 return true;
@@ -230,13 +229,15 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
         if (sc->capture_type != ScreenCaptureWindowStream) {
             sc->disp = NULL;
             [content_filter release];
-            os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
             return true;
         }
     }
 
-    sc->disp = [[SCStream alloc] initWithFilter:content_filter configuration:sc->stream_properties
-                                       delegate:sc->capture_delegate];
+    SCStream *stream = [[SCStream alloc] initWithFilter:content_filter configuration:sc->stream_properties
+                                             delegate:sc->capture_delegate];
+    @synchronized(sc->capture_delegate) {
+        sc->disp = stream;
+    }
 
     [content_filter release];
 
@@ -264,26 +265,10 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
             return false;
         }
     }
-    os_event_init(&sc->stream_start_completed, OS_EVENT_TYPE_MANUAL);
-
-    __block BOOL did_stream_start = NO;
-    sc->capture_failed = false; // Preserve a delegate failure reported between start completion and the waiter returning.
-    [sc->disp startCaptureWithCompletionHandler:^(NSError *_Nullable error) {
-        did_stream_start = (BOOL) (error == nil);
-        if (!did_stream_start) {
-            sc->capture_failed = true;
-            MACCAP_ERR("init_screen_stream: Failed to start capture domain=%s code=%ld: %s",
-                       error.domain.UTF8String, (long) error.code, error.localizedDescription.UTF8String);
-            // Clean up disp so it isn't stopped
-            [sc->disp release];
-            sc->disp = NULL;
-        }
-        os_event_signal(sc->stream_start_completed);
-    }];
-    os_event_wait(sc->stream_start_completed);
+    screen_capture_start_stream(sc);
 
     obs_source_update_properties(sc->source);
-    return did_stream_start;
+    return !sc->capture_failed;
 }
 
 API_AVAILABLE(macos(12.5)) static void *sck_video_capture_create(obs_data_t *settings, obs_source_t *source)
