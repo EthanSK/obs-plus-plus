@@ -100,6 +100,7 @@ int main() {
     assert(logs[0].find("resident_mib=512.0 memory_available=1") != std::string::npos);
     assert(logs[0].find("footprint_mib=") != std::string::npos);
     assert(logs[0].find("footprint_available=1") != std::string::npos);
+    assert(logs[0].find("sample_gap_ms=0") != std::string::npos);
     assert(logs[0].find("render_lag=3/301 main_encode_lag=2/300 recording=1 streams=2") != std::string::npos);
     assert(logs[1].find("output='adv_stream' bytes=12345 network_dropped=12") != std::string::npos);
     assert(logs[2].find("output='Aitum Stream Suite Output Twitch'") != std::string::npos);
@@ -107,7 +108,11 @@ int main() {
     for (int i = 1; i < 30; i++) { now += 1000000000ULL; bar.LogOutputHealth(); }
     assert(logs.size() == 3);
     now += 1000000000ULL; bar.LogOutputHealth(); assert(logs.size() == 6);
+    assert(logs[3].find("sample_gap_ms=30000") != std::string::npos);
     puts("PASS: repeated timer calls emit at most one snapshot per 30 seconds");
+    logs.clear(); now += 220000000000ULL; bar.LogOutputHealth();
+    assert(logs.size() == 3 && logs[0].find("sample_gap_ms=220000") != std::string::npos);
+    puts("PASS: a suspension-sized timer gap is visible without automatic output changes");
     logs.clear(); built_in.active = false; twitch.active = false; twitch.reconnecting = true;
     bar.streamOutput = nullptr; now += 30000000000ULL; bar.LogOutputHealth();
     assert(logs.size() == 2 && logs[1].find("reconnecting=1") != std::string::npos);

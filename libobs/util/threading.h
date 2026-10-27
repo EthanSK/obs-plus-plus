@@ -89,6 +89,7 @@ EXPORT int os_sem_init(os_sem_t **sem, int value);
 EXPORT void os_sem_destroy(os_sem_t *sem);
 EXPORT int os_sem_post(os_sem_t *sem);
 EXPORT int os_sem_wait(os_sem_t *sem);
+EXPORT int os_sem_timedwait(os_sem_t *sem, unsigned long milliseconds);
 
 EXPORT void os_set_thread_name(const char *name);
 

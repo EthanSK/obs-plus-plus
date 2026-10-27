@@ -4545,7 +4545,11 @@ RTMPSockBuf_Close(RTMPSockBuf *sb)
     }
 #endif
     if (sb->sb_socket != INVALID_SOCKET)
-        return closesocket(sb->sb_socket);
+    {
+        SOCKET socket = sb->sb_socket;
+        sb->sb_socket = INVALID_SOCKET; /* WriteN and RTMP_Close can both clean up a failed send; never reuse the closed descriptor. */
+        return closesocket(socket);
+    }
     return 0;
 }
 

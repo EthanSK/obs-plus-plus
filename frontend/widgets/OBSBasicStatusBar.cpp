@@ -332,6 +332,7 @@ void OBSBasicStatusBar::LogOutputHealth(double cpuUsage)
 	OBSOutput recording = OBSGetStrongRef(recordOutput);
 	const auto outputs = GetActiveStreamOutputs(stream);
 	const bool recordingActive = recording && obs_output_active(recording);
+	const uint64_t sampleGapMs = lastHealthLogTime ? (now - lastHealthLogTime) / 1000000ULL : 0;
 	lastHealthLogTime = now; // The Metal drawable leak continued after recording stopped, so keep sampling while idle.
 
 	os_proc_memory_usage_t memory = {};
@@ -352,13 +353,14 @@ void OBSBasicStatusBar::LogOutputHealth(double cpuUsage)
 	blog(LOG_INFO,
 	     "[OBS++ health] cpu=%.1f%% resident_mib=%.1f memory_available=%d footprint_mib=%.1f "
 	     "footprint_available=%d fps=%.2f render_ms=%.2f "
-	     "render_lag=%u/%u main_encode_lag=%u/%u recording=%d streams=%zu main_video_available=%d",
+	     "render_lag=%u/%u main_encode_lag=%u/%u recording=%d streams=%zu main_video_available=%d sample_gap_ms=%llu",
 	     cpuUsage, double(memory.resident_size) / (1024.0 * 1024.0), memoryAvailable, footprintMiB,
 	     footprintAvailable, mainVideoAvailable ? obs_get_active_fps() : 0.0,
 	     mainVideoAvailable ? double(obs_get_average_frame_time_ns()) / 1000000.0 : 0.0,
 	     mainVideoAvailable ? obs_get_lagged_frames() : 0, mainVideoAvailable ? obs_get_total_frames() : 0,
 	     video ? video_output_get_skipped_frames(video) : 0, video ? video_output_get_total_frames(video) : 0,
-	     recordingActive, outputs.size(), video != nullptr); // Startup can fail before video exists; mark unavailable counters instead of dereferencing null.
+	     recordingActive, outputs.size(), video != nullptr, // Startup can fail before video exists; mark unavailable counters instead of dereferencing null.
+	     (unsigned long long)sampleGapMs); // A long timer gap identifies missed diagnostics after suspension or a blocked UI, not their cause.
 	for (const auto &output : outputs) {
 		blog(LOG_INFO,
 		     "[OBS++ health] output='%s' bytes=%llu network_dropped=%d total_frames=%d congestion=%.3f "

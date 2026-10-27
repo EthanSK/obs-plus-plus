@@ -152,6 +152,16 @@ int os_sem_wait(os_sem_t *sem)
 	return (ret == WAIT_OBJECT_0) ? 0 : -1;
 }
 
+int os_sem_timedwait(os_sem_t *sem, unsigned long milliseconds)
+{
+	if (!sem)
+		return EINVAL;
+	DWORD result = WaitForSingleObject((HANDLE)sem, milliseconds);
+	if (result == WAIT_TIMEOUT)
+		return ETIMEDOUT;
+	return result == WAIT_OBJECT_0 ? 0 : EINVAL;
+}
+
 #define VC_EXCEPTION 0x406D1388
 
 #pragma pack(push, 8)

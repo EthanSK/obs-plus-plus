@@ -227,8 +227,7 @@ static void rtmp_stream_stop(void *data, uint64_t ts)
 
 	if (active(stream)) {
 		os_event_signal(stream->stop_event);
-		if (stream->stop_ts == 0)
-			os_sem_post(stream->send_sem);
+		os_sem_post(stream->send_sem); // Wake graceful Stop too: a stalled encoder may never submit another packet.
 	} else {
 		obs_output_signal_stop(stream->output, OBS_OUTPUT_SUCCESS);
 	}
@@ -507,7 +506,7 @@ static inline bool can_shutdown_stream(struct rtmp_stream *stream, struct encode
 	if (timeout)
 		info("Stream shutdown timeout reached (%d second(s))", stream->max_shutdown_time_sec);
 
-	return timeout || packet->sys_dts_usec >= (int64_t)stream->stop_ts;
+	return timeout || (packet && packet->sys_dts_usec >= (int64_t)stream->stop_ts); // Check the deadline even when an encoder stops producing packets.
 }
 
 static void set_output_error(struct rtmp_stream *stream)
@@ -649,13 +648,20 @@ static void *send_thread(void *data)
 	log_sndbuf_size(stream);
 #endif
 
-	while (os_sem_wait(stream->send_sem) == 0) {
+	for (;;) {
+		const int wait_result = stopping(stream) ? os_sem_timedwait(stream->send_sem, 100)
+						 : os_sem_wait(stream->send_sem); // Only poll the existing shutdown deadline after Stop, not while normally streaming.
+		if (wait_result != 0 && wait_result != ETIMEDOUT)
+			break;
+
 		struct encoder_packet packet;
 		struct dbr_frame dbr_frame;
 
-		if (stopping(stream) && stream->stop_ts == 0) {
+		if (stopping(stream) && (stream->stop_ts == 0 || can_shutdown_stream(stream, NULL))) {
 			break;
 		}
+		if (wait_result == ETIMEDOUT)
+			continue;
 
 		if (!get_next_packet(stream, &packet))
 			continue;

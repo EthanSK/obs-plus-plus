@@ -444,3 +444,44 @@ from `coreaudio_create`. The installed September capture plug-in lacked the
 already committed `a43fb55a3` worker fix, while the October build contained it.
 Audit and install capture plug-ins independently of the executable and QtGui;
 fixing the cursor crash alone cannot resolve synchronous CoreAudio startup.
+
+## RTMP Stop must expire without another encoded packet
+
+A paused or stalled encoder can leave an active RTMP sender waiting on an empty
+packet semaphore. Graceful Stop originally did not wake that wait, and its
+existing shutdown deadline was checked only after dequeuing a packet. The native
+actual-source regression hangs beyond a one-second configured deadline on that
+implementation; forced Stop and ordinary packet draining alone did not expose it.
+
+Wake the sender on graceful Stop as well as forced Stop. Use the existing
+shutdown deadline with a timed semaphore wait only while stopping, including
+when no packet is available. Normal streaming retains its blocking semaphore
+wait. This does not bound a native socket write, DNS lookup, connection attempt,
+or encoder teardown that is already executing. Do not claim it fixes every
+post-suspension delay or every remaining thread-ownership race.
+
+`test-rtmp-starved-stop.py` exercises the actual send/Stop code with controlled
+packet delivery. `test-semaphore-timedwait.py` separately tests real Mach
+semaphore timeouts, zero-duration waits, retained permits and delayed posting.
+The Windows and other POSIX implementations use their native timeout APIs but
+are not runtime-tested by the macOS harness. Ship libobs and obs-outputs together:
+the plug-in now needs the exported `os_sem_timedwait` symbol.
+
+## Invalidate a closed RTMP socket immediately
+
+On a failed write, librtmp calls `RTMPSockBuf_Close` before `RTMP_Close`. Leaving
+the socket number valid lets the second cleanup write to or close it again. A
+native regression proves that another file reusing that descriptor gets closed.
+Clear ownership to `INVALID_SOCKET` before closing the saved socket, preserving
+the close result and existing TLS cleanup. `test-rtmp-socket-close.py` verifies
+reused-descriptor survival and exactly-once TLS cleanup with actual file handles.
+The incident's errors 32 then 9 match this path, but descriptor reuse in that
+particular incident was not captured.
+
+Health snapshots include `sample_gap_ms` using the existing 30-second logger.
+A large gap can reflect process suspension, a blocked interface or another delay;
+it is not by itself proof of memory-pressure suspension or a memory leak.
+Do not simply cap the frame count in `video_sleep` after a long pause: video
+timestamps advance by encoded-frame count and audio by sample count, so dropping
+only one side's catch-up would desynchronize recordings. Joint audio/video
+discontinuity recovery remains separate from these verified Stop/socket fixes.

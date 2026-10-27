@@ -213,6 +213,18 @@ int os_sem_wait(os_sem_t *sem)
 	return (semaphore_wait(sem->sem) == KERN_SUCCESS) ? 0 : -1;
 }
 
+int os_sem_timedwait(os_sem_t *sem, unsigned long milliseconds)
+{
+	if (!sem)
+		return EINVAL;
+	mach_timespec_t timeout = {.tv_sec = (unsigned int)(milliseconds / 1000),
+				 .tv_nsec = (int)((milliseconds % 1000) * 1000000)};
+	kern_return_t result = semaphore_timedwait(sem->sem, timeout);
+	if (result == KERN_OPERATION_TIMED_OUT)
+		return ETIMEDOUT;
+	return result == KERN_SUCCESS ? 0 : EINVAL;
+}
+
 #else
 
 struct os_sem_data {
@@ -251,6 +263,21 @@ int os_sem_wait(os_sem_t *sem)
 	if (!sem)
 		return -1;
 	return sem_wait(&sem->sem);
+}
+
+int os_sem_timedwait(os_sem_t *sem, unsigned long milliseconds)
+{
+	if (!sem)
+		return EINVAL;
+	struct timespec deadline;
+	if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
+		return errno;
+	add_ms_to_ts(&deadline, milliseconds);
+	int result;
+	do {
+		result = sem_timedwait(&sem->sem, &deadline);
+	} while (result != 0 && errno == EINTR);
+	return result == 0 ? 0 : errno;
 }
 
 #endif
